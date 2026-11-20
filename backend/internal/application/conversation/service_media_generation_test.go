@@ -324,3 +324,117 @@ func TestStreamMediaImageSavesInlineBase64WithoutDownloading(t *testing.T) {
 		}
 	}
 }
+
+type mediaImageOutputGateway struct {
+	llmGateway
+	output *llm.GenerateOutput
+}
+
+func (g mediaImageOutputGateway) Generate(context.Context, llm.RouteConfig, llm.GenerateInput) (*llm.GenerateOutput, error) {
+	return g.output, nil
+}
+
+func TestAssistantImageOutputsSaveBothSources(t *testing.T) {
+	pngBytes := func(width int) []byte {
+		t.Helper()
+		var buffer bytes.Buffer
+		if err := png.Encode(&buffer, image.NewRGBA(image.Rect(0, 0, width, 2))); err != nil {
+			t.Fatal(err)
+		}
+		return buffer.Bytes()
+	}
+	textPNG, structuredPNG := pngBytes(2), pngBytes(3)
+	textB64 := base64.StdEncoding.EncodeToString(textPNG)
+	images := []llm.GeneratedImage{
+		{B64JSON: textB64}, // The same image in both fields should only be attached once.
+		{B64JSON: base64.StdEncoding.EncodeToString(structuredPNG)},
+	}
+	for _, tc := range []struct {
+		name               string
+		mediaTask          bool
+		text               string
+		contentType        string
+		wantMarkdownFormat string
+	}{
+		{
+			name:               "image task with inline markdown",
+			mediaTask:          true,
+			text:               "Before ![inline](data:image/png;base64," + textB64 + ") after.",
+			contentType:        "mixed",
+			wantMarkdownFormat: "Before ![inline](%s) after.\n\n![Generated image](%s)",
+		},
+		{
+			name:               "chat with standalone raw base64",
+			text:               textB64,
+			contentType:        "image",
+			wantMarkdownFormat: "![Generated image](%s)\n\n![Generated image](%s)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.NewRuntime(config.Config{})
+			store := objectstorage.NewLocal(t.TempDir())
+			upload := appupload.NewServiceWithRuntime(cfg, generatedImageUploadRepository{}, nil, appupload.Hooks{}, appupload.ErrorSet{}, "test")
+			upload.SetObjectStoreProvider(&conversationTestStoreProvider{store: store})
+			repo := &mediaImageResultRepository{conversationRunClaimRepositoryStub: &conversationRunClaimRepositoryStub{
+				runs: make(map[string]model.Run), conversation: model.Conversation{ID: 11, UserID: 1, PublicID: "conversation-11"},
+			}}
+			service := &Service{cfg: cfg, repo: repo, uploadSvc: upload}
+			var message model.Message
+			if tc.mediaTask {
+				const modelName = "image-model"
+				service.routeResolver = &textTaskRouteResolverStub{routes: map[string]*channel.ResolvedRoute{
+					modelName: {PlatformModelName: modelName, UpstreamID: 1, Protocol: llm.AdapterOpenAIImageGenerations, UpstreamModel: "gpt-image-1", ModelCapabilitiesJSON: `{"image":{"stream":false}}`},
+				}}
+				service.llmClient = mediaImageOutputGateway{output: &llm.GenerateOutput{Text: tc.text, GeneratedImages: images}}
+				registry := newGenerationStreamRegistry(nil, generationStreamOptions{})
+				defer registry.close()
+				service.generationStreams = registry
+				ctx, release, ok := registry.acquireRun(t.Context())
+				if !ok {
+					t.Fatal("acquire generation lifecycle")
+				}
+				defer release()
+				defer registry.finish(ctx, "merged-images")
+				result, err := service.StreamMediaImage(ctx, MediaImageInput{
+					UserID: 1, ConversationID: 11, TaskType: MediaImageTaskGeneration,
+					PlatformModelName: modelName, Prompt: "draw", ClientRunID: "merged-images",
+				})
+				if err != nil || result == nil {
+					t.Fatalf("image task failed: %v", err)
+				}
+				message = result.AssistantMessage
+			} else {
+				ok, err := service.persistAssistantImagePayloadIfPresent(t.Context(), persistMessageGenerationInput{
+					SendInput: SendMessageInput{UserID: 1, ConversationID: 11}, UserMessage: &model.Message{ID: 1}, AssistantMessage: &message,
+					AssistantText: tc.text, GeneratedImages: images,
+				})
+				if err != nil || !ok {
+					t.Fatalf("chat image persistence failed: %v", err)
+				}
+			}
+			refs := parseAttachmentSnapshotRefs(message.Attachments)
+			if message.ContentType != tc.contentType || len(repo.attachments) != 2 || len(refs) != 2 {
+				t.Fatalf("expected two unique image files with type %s, got %s, %d rows and %d snapshots", tc.contentType, message.ContentType, len(repo.attachments), len(refs))
+			}
+			path := func(id string) string { return "/api/v1/files/" + id + "/content" }
+			if want := fmt.Sprintf(tc.wantMarkdownFormat, path(refs[0].FileID), path(refs[1].FileID)); message.Content != want {
+				t.Fatalf("unexpected completed Markdown: %q, want %q", message.Content, want)
+			}
+			for i, expected := range [][]byte{textPNG, structuredPNG} {
+				row := repo.attachments[i]
+				if row.FileID != refs[i].FileID {
+					t.Fatalf("attachment %d does not match its snapshot", i)
+				}
+				reader, _, err := store.Open(t.Context(), row.StoragePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				actual, err := io.ReadAll(reader)
+				_ = reader.Close()
+				if err != nil || !bytes.Equal(actual, expected) {
+					t.Fatalf("stored image %d did not match the original bytes: %v", i, err)
+				}
+			}
+		})
+	}
+}

@@ -181,38 +181,17 @@ func assistantCompletionCacheWriteTokens(input persistMessageGenerationInput) in
 	return 0
 }
 
-// persistAssistantImagePayloadIfPresent 保存结构化图片或兼容旧文本图片载荷。
+// persistAssistantImagePayloadIfPresent 保存结构化图片和正文中的图片载荷。
 func (s *Service) persistAssistantImagePayloadIfPresent(ctx context.Context, input persistMessageGenerationInput) (bool, error) {
-	imageInput := assistantImageContentInput{
-		UserID: input.SendInput.UserID, ConversationID: input.SendInput.ConversationID,
-		AssistantMessageID: input.AssistantMessage.ID, ModelName: successfulMessageGenerationModelName(input),
-		Content: input.AssistantText,
-	}
-	var normalized *assistantImageContentNormalization
-	var err error
-	if len(input.GeneratedImages) > 0 {
-		normalized, err = s.normalizeAssistantGeneratedImages(ctx, assistantGeneratedImagesInput{
-			UserID:             input.SendInput.UserID,
-			ConversationID:     input.SendInput.ConversationID,
-			AssistantMessageID: input.AssistantMessage.ID,
-			ModelName:          successfulMessageGenerationModelName(input),
-			ArtifactSource:     mediaArtifactSourceFor(input.Route),
-			GeneratedImages:    input.GeneratedImages,
-		})
-		if err == nil && normalized != nil && strings.TrimSpace(input.AssistantText) != "" {
-			text := input.AssistantText
-			if ranges := assistantMarkdownImageRanges(text); len(ranges) > 0 {
-				inline := s.normalizeAssistantMarkdownImages(ctx, imageInput, ranges)
-				text = inline.Content
-				normalized.AttachmentRows = append(inline.AttachmentRows, normalized.AttachmentRows...)
-				normalized.AttachmentSnapshots = append(inline.AttachmentSnapshots, normalized.AttachmentSnapshots...)
-			}
-			normalized.ContentType = "mixed"
-			normalized.Content = text + "\n\n" + normalized.Content
-		}
-	} else {
-		normalized, err = s.normalizeAssistantImageContent(ctx, imageInput)
-	}
+	normalized, err := s.normalizeAssistantImageContent(ctx, assistantImageContentInput{
+		UserID:             input.SendInput.UserID,
+		ConversationID:     input.SendInput.ConversationID,
+		AssistantMessageID: input.AssistantMessage.ID,
+		ModelName:          successfulMessageGenerationModelName(input),
+		Content:            input.AssistantText,
+		ArtifactSource:     mediaArtifactSourceFor(input.Route),
+		GeneratedImages:    input.GeneratedImages,
+	})
 	if err != nil || normalized == nil {
 		return false, err
 	}
@@ -437,10 +416,13 @@ func (s *Service) persistInterruptedAssistantImages(ctx context.Context, result 
 	}
 	fileCtx, cancel := background.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	normalized := s.normalizeAssistantMarkdownImages(fileCtx, assistantImageContentInput{
+	normalized, err := s.normalizeAssistantImageContentWithRanges(fileCtx, assistantImageContentInput{
 		UserID: message.UserID, ConversationID: message.ConversationID, AssistantMessageID: message.ID,
 		ModelName: result.PlatformModelName, Content: original,
 	}, ranges)
+	if err != nil || normalized == nil {
+		return
+	}
 	contentType := normalized.ContentType
 	if len(normalized.AttachmentRows) == 0 && message.ContentType != "" {
 		contentType = message.ContentType

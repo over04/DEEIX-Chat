@@ -13,7 +13,6 @@ import (
 
 	"github.com/DEEIX-AI/DEEIX-Chat/backend/internal/application/channel"
 	appcm "github.com/DEEIX-AI/DEEIX-Chat/backend/internal/application/contentmoderation"
-	appupload "github.com/DEEIX-AI/DEEIX-Chat/backend/internal/application/upload"
 	domainbilling "github.com/DEEIX-AI/DEEIX-Chat/backend/internal/domain/billing"
 	model "github.com/DEEIX-AI/DEEIX-Chat/backend/internal/domain/conversation"
 	"github.com/DEEIX-AI/DEEIX-Chat/backend/internal/pkg/filetype"
@@ -451,52 +450,35 @@ func (s *Service) StreamMediaImage(ctx context.Context, input MediaImageInput) (
 		return buildBillableFailure(retErr, mediaOutputUsage(output)), retErr
 	}
 
-	hasGeneratedImages := len(output.GeneratedImages) > 0
-	if hasGeneratedImages {
-		emitMediaEvent(input.OnEvent, "saving_artifact", "saving image")
+	imageInput := assistantImageContentInput{
+		UserID:             input.UserID,
+		ConversationID:     input.ConversationID,
+		AssistantMessageID: assistantMessage.ID,
+		ModelName:          route.PlatformModelName,
+		Content:            output.Text,
+		ArtifactSource:     mediaArtifactSourceFor(route),
+		GeneratedImages:    output.GeneratedImages,
+		OnSaving:           func() { emitMediaEvent(input.OnEvent, "saving_artifact", "saving image") },
 	}
-	uploaded := make([]model.FileObject, 0, len(output.GeneratedImages))
-	attachmentRows := make([]model.Attachment, 0, len(output.GeneratedImages))
-	generatedBytesByFileID := make(map[string][]byte, len(output.GeneratedImages))
-	now := time.Now()
-	for i, image := range output.GeneratedImages {
-		data, mimeType, readErr := s.readGeneratedImage(ctx, image, mediaArtifactSourceFor(route))
-		if readErr != nil {
-			retErr = s.finalizeGeneratedMediaArtifactFailure(ctx, run, assistantMessage.ID, i+1, len(output.GeneratedImages), readErr)
-			return buildBillableFailure(retErr, output.Usage), retErr
+	var uploaded []model.FileObject
+	var generatedBytesByFileID map[string][]byte
+	if moderationCoord != nil {
+		generatedBytesByFileID = make(map[string][]byte)
+		imageInput.OnSaved = func(file model.FileObject, data []byte) {
+			uploaded = append(uploaded, file)
+			generatedBytesByFileID[file.FileID] = data
 		}
-		fileName := generatedImageFileName(route.PlatformModelName, now, i, len(output.GeneratedImages), mimeType)
-		uploadResult, uploadErr := s.uploadSvc.UploadFile(ctx, appupload.UploadFileInput{
-			UserID:       input.UserID,
-			Purpose:      "generated_image",
-			FileName:     fileName,
-			MimeType:     mimeType,
-			DeclaredSize: int64(len(data)),
-			Reader:       bytes.NewReader(data),
-			MaxBytes:     maxGeneratedImageBytes,
-		})
-		if uploadErr != nil {
-			retErr = uploadErr
+	}
+	normalized, imageErr := s.normalizeAssistantImageContent(ctx, imageInput)
+	if imageErr != nil {
+		var readErr *assistantImageReadError
+		if errors.As(imageErr, &readErr) {
+			retErr = s.finalizeGeneratedMediaArtifactFailure(ctx, run, assistantMessage.ID, readErr.index, len(output.GeneratedImages), readErr.err)
+		} else {
+			retErr = imageErr
 			_ = s.repo.UpdateMessageState(ctx, assistantMessage.ID, "error", classifyRunErrorCode(retErr), textutil.TruncateTrimmed(messageErrorSummary(retErr), 255))
-			return buildBillableFailure(uploadErr, output.Usage), uploadErr
 		}
-		file := uploadResult.File
-		uploaded = append(uploaded, file)
-		generatedBytesByFileID[file.FileID] = data
-		attachmentRows = append(attachmentRows, model.Attachment{
-			ConversationID: input.ConversationID,
-			MessageID:      assistantMessage.ID,
-			UserID:         input.UserID,
-			FileID:         file.FileID,
-			Kind:           "image",
-			FileName:       file.FileName,
-			MimeType:       file.DetectedMIME,
-			FileSize:       file.SizeBytes,
-			SHA256:         file.SHA256,
-			StoragePath:    file.StoragePath,
-			Status:         "active",
-			UploadedAt:     now,
-		})
+		return buildBillableFailure(retErr, output.Usage), retErr
 	}
 	usage := output.Usage
 	if reuseUserMessage {
@@ -510,11 +492,12 @@ func (s *Service) StreamMediaImage(ctx context.Context, input MediaImageInput) (
 		userMessage.TokenUsage = usage.InputTokens + usage.CacheReadTokens + usage.CacheWriteTokens
 	}
 
-	contentType := "image"
-	content := generatedImageMarkdown(uploaded)
-	if !hasGeneratedImages {
-		contentType = "text"
-		content = strings.TrimSpace(output.Text)
+	contentType, content := "text", strings.TrimSpace(output.Text)
+	var attachmentRows []model.Attachment
+	var attachmentSnapshots []AttachmentInput
+	if normalized != nil {
+		contentType, content = normalized.ContentType, normalized.Content
+		attachmentRows, attachmentSnapshots = normalized.AttachmentRows, normalized.AttachmentSnapshots
 	}
 	latencyMS := time.Since(startedAt).Milliseconds()
 	// 上游与文件上传已完成后，数据库侧的附件、用量和完成态仍需保持原子一致。
@@ -570,7 +553,7 @@ func (s *Service) StreamMediaImage(ctx context.Context, input MediaImageInput) (
 	}
 	assistantMessage.LatencyMS = latencyMS
 	assistantMessage.Status = "success"
-	assistantMessage.Attachments = string(marshalAttachmentSnapshots(attachmentsFromFiles(uploaded)))
+	assistantMessage.Attachments = marshalAttachmentSnapshots(attachmentSnapshots)
 	run.InputTokens = usage.InputTokens
 	run.OutputTokens = usage.OutputTokens
 	run.CacheReadTokens = usage.CacheReadTokens

@@ -120,10 +120,10 @@ func TestSaveAssistantImagesIgnoresUserUploadLimits(t *testing.T) {
 	uploadSvc.SetObjectStoreProvider(&conversationTestStoreProvider{store: objectstorage.NewLocal(t.TempDir())})
 	service := &Service{cfg: runtimeCfg, uploadSvc: uploadSvc}
 
-	result, err := service.saveAssistantImages(t.Context(), assistantImageSaveInput{
-		UserID:    1,
-		ModelName: "image-model",
-		Images:    []assistantImagePayload{{Bytes: encoded.Bytes(), MIMEType: "image/png"}},
+	result, err := service.normalizeAssistantImageContent(t.Context(), assistantImageContentInput{
+		UserID:          1,
+		ModelName:       "image-model",
+		GeneratedImages: []llm.GeneratedImage{{B64JSON: base64.StdEncoding.EncodeToString(encoded.Bytes()), MIMEType: "image/png"}},
 	})
 	if err != nil {
 		t.Fatalf("save generated image: %v", err)

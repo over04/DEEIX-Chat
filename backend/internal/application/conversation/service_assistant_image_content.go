@@ -42,69 +42,112 @@ type assistantImageContentInput struct {
 	AssistantMessageID uint
 	ModelName          string
 	Content            string
-}
-
-type assistantGeneratedImagesInput struct {
-	UserID             uint
-	ConversationID     uint
-	AssistantMessageID uint
-	ModelName          string
 	ArtifactSource     mediaArtifactSource
 	GeneratedImages    []llm.GeneratedImage
+	OnSaving           func()
+	OnSaved            func(model.FileObject, []byte)
 }
 
-type assistantImageSaveInput struct {
-	UserID             uint
-	ConversationID     uint
-	AssistantMessageID uint
-	ModelName          string
-	Images             []assistantImagePayload
+type assistantImageReadError struct {
+	index int
+	err   error
 }
 
+func (e *assistantImageReadError) Error() string { return e.err.Error() }
+func (e *assistantImageReadError) Unwrap() error { return e.err }
+
+// normalizeAssistantImageContent is the shared save path for chat and image tasks.
+// An image may appear in either output field or in both, so inspect both fields.
 func (s *Service) normalizeAssistantImageContent(ctx context.Context, input assistantImageContentInput) (*assistantImageContentNormalization, error) {
-	if ranges := assistantMarkdownImageRanges(input.Content); len(ranges) > 0 {
-		return s.normalizeAssistantMarkdownImages(ctx, input, ranges), nil
-	}
-	// A fenced Markdown example is code, not an image to persist.
-	if markdownDataImageRE.MatchString(unwrapAssistantImageContent(input.Content)) {
-		return nil, nil
-	}
-	candidates := extractAssistantImageCandidates(input.Content)
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-	images := make([]assistantImagePayload, 0, len(candidates))
-	for _, candidate := range candidates {
-		data, mimeType, ok := decodeAssistantImageCandidate(candidate)
-		if !ok {
-			continue
+	return s.normalizeAssistantImageContentWithRanges(ctx, input, assistantMarkdownImageRanges(input.Content))
+}
+
+func (s *Service) normalizeAssistantImageContentWithRanges(ctx context.Context, input assistantImageContentInput, ranges []markdownImageRange) (*assistantImageContentNormalization, error) {
+	saver := assistantImageSaver{service: s, input: input, now: time.Now()}
+	content := input.Content
+	imageOnly := false
+	if len(ranges) > 0 {
+		content = saver.saveMarkdownImages(ctx, ranges)
+		imageOnly = markdownDataImageRE.MatchString(strings.TrimSpace(input.Content))
+	} else if !markdownDataImageRE.MatchString(unwrapAssistantImageContent(input.Content)) {
+		// A fenced Markdown example is code, not an image to persist.
+		candidates := extractAssistantImageCandidates(input.Content)
+		for _, candidate := range candidates {
+			data, mimeType, ok := decodeAssistantImageCandidate(candidate)
+			if !ok {
+				continue
+			}
+			if _, err := saver.save(ctx, assistantImagePayload{Bytes: data, MIMEType: mimeType}, sha256.Sum256(data), len(candidates)+len(input.GeneratedImages)); err != nil {
+				return nil, err
+			}
 		}
-		images = append(images, assistantImagePayload{Bytes: data, MIMEType: mimeType})
-		if len(images) >= maxAssistantImageContentItems {
+		if len(saver.files) != 0 {
+			content = generatedImageMarkdown(saver.files)
+			imageOnly = true
+		}
+	}
+
+	textFileCount := len(saver.files)
+	for i, image := range input.GeneratedImages {
+		data, mimeType, err := s.readGeneratedImage(ctx, image, input.ArtifactSource)
+		if err != nil {
+			return nil, &assistantImageReadError{index: i + 1, err: err}
+		}
+		if _, err := saver.save(ctx, assistantImagePayload{Bytes: data, MIMEType: mimeType}, sha256.Sum256(data), textFileCount+len(input.GeneratedImages)); err != nil {
+			return nil, err
+		}
+	}
+	if len(saver.files) > textFileCount {
+		markdown := generatedImageMarkdown(saver.files[textFileCount:])
+		if strings.TrimSpace(content) == "" {
+			content, imageOnly = markdown, true
+		} else {
+			content += "\n\n" + markdown
+		}
+	}
+	if len(saver.files) == 0 && len(ranges) == 0 {
+		return nil, nil
+	}
+	contentType := "text"
+	if len(saver.files) != 0 {
+		contentType = "mixed"
+		if imageOnly {
+			contentType = "image"
+		}
+	}
+	return &assistantImageContentNormalization{
+		Content:             content,
+		ContentType:         contentType,
+		AttachmentRows:      saver.attachments,
+		AttachmentSnapshots: attachmentsFromFiles(saver.files),
+	}, nil
+}
+
+type assistantImageSaver struct {
+	service     *Service
+	input       assistantImageContentInput
+	now         time.Time
+	byDigest    map[[sha256.Size]byte]string
+	files       []model.FileObject
+	attachments []model.Attachment
+}
+
+// saveMarkdownImages changes only image destinations. Invalid/over-limit images
+// leave a placeholder without making the rest of the reply fail.
+func (w *assistantImageSaver) saveMarkdownImages(ctx context.Context, ranges []markdownImageRange) string {
+	byDestination := make(map[int]string)
+	// Cache empty file IDs for failed uploads so repeated Markdown images do not retry.
+	attemptedFileIDs := make(map[[sha256.Size]byte]string)
+	totalBytes := 0
+	storageFailed := false
+	for i, image := range ranges {
+		if i >= maxAssistantImageContentItems {
 			break
 		}
-	}
-	return s.saveAssistantImages(ctx, assistantImageSaveInput{
-		UserID:             input.UserID,
-		ConversationID:     input.ConversationID,
-		AssistantMessageID: input.AssistantMessageID,
-		ModelName:          input.ModelName,
-		Images:             images,
-	})
-}
-
-// normalizeAssistantMarkdownImages changes destinations only. Invalid/over-limit
-// inline images never turn the rest of a text response into a generation error.
-func (s *Service) normalizeAssistantMarkdownImages(ctx context.Context, input assistantImageContentInput, ranges []markdownImageRange) *assistantImageContentNormalization {
-	images := make([]assistantImagePayload, 0, min(len(ranges), maxAssistantImageContentItems))
-	byDigest := make(map[[sha256.Size]byte]int)
-	byDestination := make(map[int]int)
-	totalBytes := 0
-	for i, image := range ranges {
-		if i >= maxAssistantImageContentItems || !image.complete {
+		if !image.complete {
 			continue
 		}
-		url := strings.TrimSpace(input.Content[image.destination:image.end])
+		url := strings.TrimSpace(w.input.Content[image.destination:image.end])
 		candidate, ok := assistantImageCandidateFromString(url, false)
 		if !ok {
 			continue
@@ -114,125 +157,76 @@ func (s *Service) normalizeAssistantMarkdownImages(ctx context.Context, input as
 			continue
 		}
 		digest := sha256.Sum256(data)
-		index, seen := byDigest[digest]
+		fileID, seen := attemptedFileIDs[digest]
 		if !seen {
 			if len(data) > maxGeneratedImageBytes-totalBytes {
 				continue
 			}
-			index = len(images)
-			images = append(images, assistantImagePayload{Bytes: data, MIMEType: mimeType})
-			byDigest[digest] = index
 			totalBytes += len(data)
+			var err error
+			fileID, err = w.save(ctx, assistantImagePayload{Bytes: data, MIMEType: mimeType}, digest, len(ranges)+len(w.input.GeneratedImages))
+			storageFailed = storageFailed || err != nil
+			attemptedFileIDs[digest] = fileID
 		}
-		byDestination[image.destination] = index
+		byDestination[image.destination] = fileID
 	}
-	normalized := &assistantImageContentNormalization{ContentType: "text"}
-	fileIDs := make([]string, len(images))
-	storageFailed := false
-	for i, image := range images {
-		saved, err := s.saveAssistantImages(ctx, assistantImageSaveInput{
-			UserID: input.UserID, ConversationID: input.ConversationID, AssistantMessageID: input.AssistantMessageID,
-			ModelName: input.ModelName, Images: []assistantImagePayload{image},
-		})
-		if err != nil || saved == nil {
-			storageFailed = true
-			continue
-		}
-		fileIDs[i] = saved.AttachmentRows[0].FileID
-		normalized.AttachmentRows = append(normalized.AttachmentRows, saved.AttachmentRows...)
-		normalized.AttachmentSnapshots = append(normalized.AttachmentSnapshots, saved.AttachmentSnapshots...)
-	}
-	if storageFailed && s.logger != nil {
+	if storageFailed && w.service.logger != nil {
 		// Avoid logging the reply or its Base64 payload.
-		s.logger.Warn("assistant_markdown_image_storage_failed")
+		w.service.logger.Warn("assistant_markdown_image_storage_failed")
 	}
-	if len(normalized.AttachmentRows) != 0 {
-		normalized.ContentType = "mixed"
-		if markdownDataImageRE.MatchString(strings.TrimSpace(input.Content)) {
-			normalized.ContentType = "image"
+	return rewriteAssistantMarkdownImageURLs(w.input.Content, ranges, func(image markdownImageRange) string {
+		if fileID := byDestination[image.destination]; fileID != "" {
+			return "/api/v1/files/" + fileID + "/content"
 		}
-	}
-	normalized.Content = rewriteAssistantMarkdownImageURLs(input.Content, ranges, func(image markdownImageRange) string {
-		index, ok := byDestination[image.destination]
-		if !ok || fileIDs[index] == "" {
-			return assistantImageFailedURL
-		}
-		return "/api/v1/files/" + fileIDs[index] + "/content"
-	})
-	return normalized
-}
-
-// normalizeAssistantGeneratedImages 将协议层结构化图片结果转换为消息附件。
-func (s *Service) normalizeAssistantGeneratedImages(ctx context.Context, input assistantGeneratedImagesInput) (*assistantImageContentNormalization, error) {
-	images := make([]assistantImagePayload, 0, len(input.GeneratedImages))
-	for _, image := range input.GeneratedImages {
-		data, mimeType, err := s.readGeneratedImage(ctx, image, input.ArtifactSource)
-		if err != nil {
-			return nil, err
-		}
-		images = append(images, assistantImagePayload{Bytes: data, MIMEType: mimeType})
-		if len(images) >= maxAssistantImageContentItems {
-			break
-		}
-	}
-	return s.saveAssistantImages(ctx, assistantImageSaveInput{
-		UserID:             input.UserID,
-		ConversationID:     input.ConversationID,
-		AssistantMessageID: input.AssistantMessageID,
-		ModelName:          input.ModelName,
-		Images:             images,
+		return assistantImageFailedURL
 	})
 }
 
-// saveAssistantImages 统一保存助手生成的图片，并构造消息附件快照。
-func (s *Service) saveAssistantImages(ctx context.Context, input assistantImageSaveInput) (*assistantImageContentNormalization, error) {
-	if len(input.Images) == 0 {
-		return nil, nil
+func (w *assistantImageSaver) save(ctx context.Context, image assistantImagePayload, digest [sha256.Size]byte, count int) (string, error) {
+	if id := w.byDigest[digest]; id != "" {
+		return id, nil
 	}
-
-	uploaded := make([]model.FileObject, 0, len(input.Images))
-	attachmentRows := make([]model.Attachment, 0, len(input.Images))
-	now := time.Now()
-	for _, image := range input.Images {
-		fileName := generatedImageFileName(input.ModelName, now, len(uploaded), len(input.Images), image.MIMEType)
-		uploadResult, uploadErr := s.uploadSvc.UploadFile(ctx, appupload.UploadFileInput{
-			UserID:       input.UserID,
-			Purpose:      "generated_image",
-			FileName:     fileName,
-			MimeType:     image.MIMEType,
-			DeclaredSize: int64(len(image.Bytes)),
-			Reader:       bytes.NewReader(image.Bytes),
-			MaxBytes:     maxGeneratedImageBytes,
-		})
-		if uploadErr != nil {
-			return nil, uploadErr
-		}
-		file := uploadResult.File
-		uploaded = append(uploaded, file)
-		attachmentRows = append(attachmentRows, model.Attachment{
-			ConversationID: input.ConversationID,
-			MessageID:      input.AssistantMessageID,
-			UserID:         input.UserID,
-			FileID:         file.FileID,
-			Kind:           "image",
-			FileName:       file.FileName,
-			MimeType:       file.DetectedMIME,
-			FileSize:       file.SizeBytes,
-			SHA256:         file.SHA256,
-			StoragePath:    file.StoragePath,
-			Status:         "active",
-			UploadedAt:     now,
-		})
+	if w.input.OnSaving != nil {
+		w.input.OnSaving()
+		w.input.OnSaving = nil
 	}
-	if len(uploaded) == 0 {
-		return nil, nil
+	fileName := generatedImageFileName(w.input.ModelName, w.now, len(w.files), count, image.MIMEType)
+	result, err := w.service.uploadSvc.UploadFile(ctx, appupload.UploadFileInput{
+		UserID:       w.input.UserID,
+		Purpose:      "generated_image",
+		FileName:     fileName,
+		MimeType:     image.MIMEType,
+		DeclaredSize: int64(len(image.Bytes)),
+		Reader:       bytes.NewReader(image.Bytes),
+		MaxBytes:     maxGeneratedImageBytes,
+	})
+	if err != nil {
+		return "", err
 	}
-	return &assistantImageContentNormalization{
-		Content:             generatedImageMarkdown(uploaded),
-		ContentType:         "image",
-		AttachmentRows:      attachmentRows,
-		AttachmentSnapshots: attachmentsFromFiles(uploaded),
-	}, nil
+	file := result.File
+	if w.byDigest == nil {
+		w.byDigest = make(map[[sha256.Size]byte]string)
+	}
+	w.byDigest[digest] = file.FileID
+	w.files = append(w.files, file)
+	w.attachments = append(w.attachments, model.Attachment{
+		ConversationID: w.input.ConversationID,
+		MessageID:      w.input.AssistantMessageID,
+		UserID:         w.input.UserID,
+		FileID:         file.FileID,
+		Kind:           "image",
+		FileName:       file.FileName,
+		MimeType:       file.DetectedMIME,
+		FileSize:       file.SizeBytes,
+		SHA256:         file.SHA256,
+		StoragePath:    file.StoragePath,
+		Status:         "active",
+		UploadedAt:     w.now,
+	})
+	if w.input.OnSaved != nil {
+		w.input.OnSaved(file, image.Bytes)
+	}
+	return file.FileID, nil
 }
 
 func extractAssistantImageCandidates(content string) []assistantImageCandidate {
