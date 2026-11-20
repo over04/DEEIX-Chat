@@ -457,7 +457,7 @@ export function ChatMessageBot({
           </>
         ) : hasStreamdownContent && markdownRender ? (
           <StreamdownRender
-            content={streamdownContent}
+            content={renderableContent}
             streaming={Boolean(item.isStreaming)}
             autoExpandThinking={autoExpandThinking}
             imageActions={markdownImageActions}

@@ -3,6 +3,7 @@ package conversation
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"regexp"
@@ -20,6 +21,7 @@ var markdownDataImageRE = regexp.MustCompile(`(?is)^!\[[^\]]*\]\((data:image/[^)
 
 type assistantImageContentNormalization struct {
 	Content             string
+	ContentType         string
 	AttachmentRows      []model.Attachment
 	AttachmentSnapshots []AttachmentInput
 }
@@ -60,6 +62,13 @@ type assistantImageSaveInput struct {
 }
 
 func (s *Service) normalizeAssistantImageContent(ctx context.Context, input assistantImageContentInput) (*assistantImageContentNormalization, error) {
+	if ranges := assistantMarkdownImageRanges(input.Content); len(ranges) > 0 {
+		return s.normalizeAssistantMarkdownImages(ctx, input, ranges), nil
+	}
+	// A fenced Markdown example is code, not an image to persist.
+	if markdownDataImageRE.MatchString(unwrapAssistantImageContent(input.Content)) {
+		return nil, nil
+	}
 	candidates := extractAssistantImageCandidates(input.Content)
 	if len(candidates) == 0 {
 		return nil, nil
@@ -82,6 +91,75 @@ func (s *Service) normalizeAssistantImageContent(ctx context.Context, input assi
 		ModelName:          input.ModelName,
 		Images:             images,
 	})
+}
+
+// normalizeAssistantMarkdownImages changes destinations only. Invalid/over-limit
+// inline images never turn the rest of a text response into a generation error.
+func (s *Service) normalizeAssistantMarkdownImages(ctx context.Context, input assistantImageContentInput, ranges []markdownImageRange) *assistantImageContentNormalization {
+	images := make([]assistantImagePayload, 0, min(len(ranges), maxAssistantImageContentItems))
+	byDigest := make(map[[sha256.Size]byte]int)
+	byDestination := make(map[int]int)
+	totalBytes := 0
+	for i, image := range ranges {
+		if i >= maxAssistantImageContentItems || !image.complete {
+			continue
+		}
+		url := strings.TrimSpace(input.Content[image.destination:image.end])
+		candidate, ok := assistantImageCandidateFromString(url, false)
+		if !ok {
+			continue
+		}
+		data, mimeType, ok := decodeAssistantImageCandidate(candidate)
+		if !ok {
+			continue
+		}
+		digest := sha256.Sum256(data)
+		index, seen := byDigest[digest]
+		if !seen {
+			if len(data) > maxGeneratedImageBytes-totalBytes {
+				continue
+			}
+			index = len(images)
+			images = append(images, assistantImagePayload{Bytes: data, MIMEType: mimeType})
+			byDigest[digest] = index
+			totalBytes += len(data)
+		}
+		byDestination[image.destination] = index
+	}
+	normalized := &assistantImageContentNormalization{ContentType: "text"}
+	fileIDs := make([]string, len(images))
+	storageFailed := false
+	for i, image := range images {
+		saved, err := s.saveAssistantImages(ctx, assistantImageSaveInput{
+			UserID: input.UserID, ConversationID: input.ConversationID, AssistantMessageID: input.AssistantMessageID,
+			ModelName: input.ModelName, Images: []assistantImagePayload{image},
+		})
+		if err != nil || saved == nil {
+			storageFailed = true
+			continue
+		}
+		fileIDs[i] = saved.AttachmentRows[0].FileID
+		normalized.AttachmentRows = append(normalized.AttachmentRows, saved.AttachmentRows...)
+		normalized.AttachmentSnapshots = append(normalized.AttachmentSnapshots, saved.AttachmentSnapshots...)
+	}
+	if storageFailed && s.logger != nil {
+		// Avoid logging the reply or its Base64 payload.
+		s.logger.Warn("assistant_markdown_image_storage_failed")
+	}
+	if len(normalized.AttachmentRows) != 0 {
+		normalized.ContentType = "mixed"
+		if markdownDataImageRE.MatchString(strings.TrimSpace(input.Content)) {
+			normalized.ContentType = "image"
+		}
+	}
+	normalized.Content = rewriteAssistantMarkdownImageURLs(input.Content, ranges, func(image markdownImageRange) string {
+		index, ok := byDestination[image.destination]
+		if !ok || fileIDs[index] == "" {
+			return assistantImageFailedURL
+		}
+		return "/api/v1/files/" + fileIDs[index] + "/content"
+	})
+	return normalized
 }
 
 // normalizeAssistantGeneratedImages 将协议层结构化图片结果转换为消息附件。
@@ -151,6 +229,7 @@ func (s *Service) saveAssistantImages(ctx context.Context, input assistantImageS
 	}
 	return &assistantImageContentNormalization{
 		Content:             generatedImageMarkdown(uploaded),
+		ContentType:         "image",
 		AttachmentRows:      attachmentRows,
 		AttachmentSnapshots: attachmentsFromFiles(uploaded),
 	}, nil
@@ -277,7 +356,7 @@ func dataURLImageMIMEType(value string) string {
 	}
 	semicolon := strings.Index(text, ";")
 	comma := strings.Index(text, ",")
-	if comma < 0 || (semicolon >= 0 && semicolon > comma) {
+	if semicolon < len("data:image/")+1 || comma < 0 || semicolon > comma || !strings.EqualFold(text[semicolon:comma], ";base64") {
 		return ""
 	}
 	return strings.TrimSpace(text[len("data:"):semicolon])
@@ -298,8 +377,14 @@ func isLikelyBase64Payload(value string) bool {
 }
 
 func decodeAssistantImageCandidate(candidate assistantImageCandidate) ([]byte, string, bool) {
-	encoded := normalizeBase64ImagePayload(stripBase64DataURLPrefix(candidate.Value))
-	if encoded == "" {
+	raw := stripBase64DataURLPrefix(candidate.Value)
+	// Bound allocations before normalization and decoding, including malformed inputs.
+	limit := base64.StdEncoding.EncodedLen(maxGeneratedImageBytes)
+	if len(raw) > limit+limit/8 {
+		return nil, "", false
+	}
+	encoded := normalizeBase64ImagePayload(raw)
+	if encoded == "" || len(encoded) > limit {
 		return nil, "", false
 	}
 	data, err := base64.StdEncoding.DecodeString(encoded)
@@ -307,6 +392,9 @@ func decodeAssistantImageCandidate(candidate assistantImageCandidate) ([]byte, s
 		data, err = base64.RawStdEncoding.DecodeString(encoded)
 	}
 	if err != nil {
+		return nil, "", false
+	}
+	if len(data) > maxGeneratedImageBytes {
 		return nil, "", false
 	}
 	data, mimeType, err := validateGeneratedImageBytes(data, candidate.MIMEType)

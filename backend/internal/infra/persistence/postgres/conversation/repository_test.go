@@ -36,6 +36,49 @@ func TestReplaceActiveConversationShareReportsMissingSchemaColumn(t *testing.T) 
 	}
 }
 
+func TestFinalizeInterruptedAssistantImagesCommitsOnce(t *testing.T) {
+	db := openConversationRepositoryTestDB(t)
+	repo := NewRepo(db)
+	const original = "Before ![alt](data:image/png;base64,AAAA) after"
+	const rewritten = "Before ![alt](/api/v1/files/file_interrupted/content) after"
+	file := models.FileObject{UserID: 1, FileID: "file_interrupted", Status: "active"}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatal(err)
+	}
+	message := models.Message{UserID: 1, ConversationID: 1, PublicID: "msg_interrupted", Role: "assistant", Status: "interrupted", Content: original, ContentType: "text", OutputTokens: 32}
+	if err := db.Create(&message).Error; err != nil {
+		t.Fatal(err)
+	}
+	rows := []domainconversation.Attachment{{FileID: file.FileID, Kind: "image", Status: "active"}}
+	oldMessage := models.Message{UserID: 1, ConversationID: 1, PublicID: "msg_old", Role: "assistant", Status: "success", Content: original, ContentType: "text"}
+	if err := db.Create(&oldMessage).Error; err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := repo.FinalizeInterruptedAssistantImages(t.Context(), 1, 1, oldMessage.ID, original, rewritten, "mixed", rows); err != nil || applied {
+		t.Fatalf("old message update = %v, %v", applied, err)
+	}
+	for i, call := range []struct {
+		owner    uint
+		didApply bool
+	}{{2, false}, {1, true}, {1, false}} {
+		applied, err := repo.FinalizeInterruptedAssistantImages(t.Context(), call.owner, 1, message.ID, original, rewritten, "mixed", rows)
+		if call.owner != 1 && err != nil {
+			continue
+		}
+		if applied != call.didApply || err != nil {
+			t.Fatalf("attempt %d = %v, %v", i, applied, err)
+		}
+	}
+	got, err := repo.GetMessageByID(t.Context(), 1, message.ID)
+	if err != nil || got.Content != rewritten || got.ContentType != "mixed" || got.Status != "interrupted" || got.OutputTokens != 32 || !got.UpdatedAt.Equal(message.UpdatedAt) {
+		t.Fatalf("message = %+v, %v", got, err)
+	}
+	var count int64
+	if err := db.Model(&models.Attachment{}).Where("message_id = ? AND file_id = ?", message.ID, file.FileID).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("attached files = %d, %v", count, err)
+	}
+}
+
 func TestAttachmentDurationSecondsFromMetaJSON(t *testing.T) {
 	if got := attachmentDurationSecondsFromMetaJSON(`{"duration_seconds":6}`); got != 6 {
 		t.Fatalf("expected attachment duration 6, got %d", got)

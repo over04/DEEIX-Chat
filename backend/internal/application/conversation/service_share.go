@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -328,6 +329,7 @@ func (s *Service) CloneSharedConversation(ctx context.Context, userID uint, shar
 		if clonedRunID == "" && sourceMessage.ProcessTrace != nil {
 			clonedRunID = "run_" + normalizePublicID(uuid.NewString())
 		}
+		sourceMessage.Content = rewriteClonedFileLinks(sourceMessage, clonedFiles)
 		clonedMessage, err := s.cloneSharedMessage(ctx, userID, targetConversation.ID, sourceMessage, clonedRunID, clonedMessageIDs)
 		if err != nil {
 			return nil, err
@@ -440,6 +442,27 @@ func (s *Service) cloneSharedFiles(
 		cloned[sourceFileID] = target
 	}
 	return cloned, nil
+}
+
+var sharedFileContentURL = regexp.MustCompile(`/api/v1/files/([A-Za-z0-9_-]+)/content`)
+
+func rewriteClonedFileLinks(source model.Message, clonedFiles map[string]*model.FileObject) string {
+	if len(clonedFiles) == 0 || !strings.Contains(source.Content, "/api/v1/files/") {
+		return source.Content
+	}
+	files := make(map[string]string)
+	for _, attachment := range parseSharedAttachmentSnapshots(source.Attachments) {
+		if file := clonedFiles[attachment.FileID]; file != nil {
+			files[attachment.FileID] = file.FileID
+		}
+	}
+	return sharedFileContentURL.ReplaceAllStringFunc(source.Content, func(url string) string {
+		id := strings.TrimSuffix(strings.TrimPrefix(url, "/api/v1/files/"), "/content")
+		if cloned := files[id]; cloned != "" {
+			return "/api/v1/files/" + cloned + "/content"
+		}
+		return url
+	})
 }
 
 func collectSharedAttachmentFileIDs(messages []model.Message) []string {

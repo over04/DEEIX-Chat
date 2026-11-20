@@ -4,10 +4,14 @@ export type RenderSegment =
   | {
       type: "markdown";
       content: string;
+      start: number;
+      end: number;
     }
   | {
       type: "thinking";
       content: string;
+      start: number;
+      end: number;
       incomplete: boolean;
     };
 
@@ -296,11 +300,38 @@ function normalizeDollarMathSegments(source: string): string {
       nextContent = `${nextContent.startsWith("$") ? " " : ""}${nextContent}${nextContent.endsWith("$") ? " " : ""}`;
     }
 
-    if (nextContent === mathContent && delimiter.length === span.delimiterLength) {
+    let leadingBreak = "";
+    let trailingBreak = "";
+    if (!inline) {
+      const lineStart = source.lastIndexOf("\n", span.start - 1) + 1;
+      const prefix = source.slice(lineStart, span.start);
+      const blockPrefix = /^([\t ]*(?:>[\t ]*)*)(?:(?:[-+*]|\d+[.)])([\t ]+))?$/.exec(prefix);
+      if (blockPrefix) {
+        // A display delimiter followed by TeX on its opening line is parsed as
+        // inline math by remark. Make the fences structural without flattening TeX.
+        const continuation = blockPrefix[1] + " ".repeat(prefix.length - blockPrefix[1].length);
+        if (!/^[\t ]*\r?\n/.test(nextContent)) {
+          nextContent = "\n" + continuation + nextContent.replace(/^[\t ]+/, "");
+        }
+        if (!/\n[\t >]*$/.test(nextContent)) {
+          nextContent = nextContent.replace(/[\t ]+$/, "") + "\n" + continuation;
+        }
+        const lineEnd = source.indexOf("\n", span.end);
+        if (source.slice(span.end, lineEnd === -1 ? undefined : lineEnd).trim()) {
+          trailingBreak = "\n" + continuation;
+        }
+      } else if (nextContent.includes("\n") && !prefix.includes("|")) {
+        nextContent = "\n" + nextContent.trim() + "\n";
+        leadingBreak = "\n\n";
+        trailingBreak = "\n\n";
+      }
+    }
+
+    if (nextContent === mathContent && delimiter.length === span.delimiterLength && !leadingBreak && !trailingBreak) {
       continue;
     }
     normalizedSource += source.slice(consumedUntil, span.start);
-    normalizedSource += delimiter + nextContent + delimiter;
+    normalizedSource += leadingBreak + delimiter + nextContent + delimiter + trailingBreak;
     consumedUntil = span.end;
   }
 
@@ -735,6 +766,8 @@ export function parseStreamdownSegments(
       segments.push({
         type: "markdown",
         content: escapeThinkingLikeHtmlTags(normalizedSource),
+        start: 0,
+        end: normalizedSource.length,
       });
     }
     return segments;
@@ -743,6 +776,8 @@ export function parseStreamdownSegments(
   segments.push({
     type: "thinking",
     content: thinkingBlock.content,
+    start: thinkingBlock.start,
+    end: thinkingBlock.start + thinkingBlock.content.length,
     incomplete: thinkingBlock.incomplete,
   });
 
@@ -751,6 +786,8 @@ export function parseStreamdownSegments(
     segments.push({
       type: "markdown",
       content: escapeThinkingLikeHtmlTags(tail),
+      start: thinkingBlock.end,
+      end: normalizedSource.length,
     });
   }
 
@@ -759,7 +796,7 @@ export function parseStreamdownSegments(
 
 function parseLeadingThinkingBlock(
   source: string,
-): { content: string; end: number; incomplete: boolean } | null {
+): { content: string; start: number; end: number; incomplete: boolean } | null {
   const firstContentIndex = source.search(/\S/);
   if (firstContentIndex < 0) {
     return null;
@@ -780,6 +817,7 @@ function parseLeadingThinkingBlock(
   if (!closingMatch) {
     return {
       content: source.slice(contentStart),
+      start: contentStart,
       end: source.length,
       incomplete: true,
     };
@@ -789,6 +827,7 @@ function parseLeadingThinkingBlock(
   const closeEnd = closeStart + closingMatch[0].length;
   return {
     content: source.slice(contentStart, closeStart),
+    start: contentStart,
     end: closeEnd,
     incomplete: false,
   };

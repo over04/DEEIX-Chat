@@ -4,14 +4,13 @@ import * as React from "react";
 import { useTranslations } from "next-intl";
 
 import { useCopyAction } from "@/shared/components/copy-action";
-import { CODE_BLOCK_PLAIN_TEXT_MIME } from "@/shared/lib/clipboard";
+import { getCopyableMarkdownSource, listenForMarkdownSelectionCopy } from "./markdown-selection-copy";
 
 const LATEX_COPYABLE_SELECTOR = ".katex, .katex-display";
 const LATEX_ANNOTATION_SELECTOR = "annotation[encoding='application/x-tex']";
 const LATEX_INTERACTION_EXCLUSION_SELECTOR = "a, button, input, textarea, select, summary, pre, code, [contenteditable='true']";
 const INLINE_CODE_COPYABLE_SELECTOR = "code:not(pre code)";
 const INLINE_CODE_INTERACTION_EXCLUSION_SELECTOR = "a, button, input, textarea, select, summary, [contenteditable='true']";
-const CODE_BLOCK_BODY_SELECTOR = "[data-streamdown='code-block-body']";
 const MARKDOWN_COPY_POINTER_DRAG_THRESHOLD = 6;
 
 type UseMarkdownCopyOptions = {
@@ -22,7 +21,6 @@ type UseMarkdownCopyOptions = {
 type UseMarkdownCopyResult = {
   rootRef: React.RefObject<HTMLDivElement | null>;
   onClickCapture: React.MouseEventHandler<HTMLDivElement>;
-  onCopyCapture: React.ClipboardEventHandler<HTMLDivElement>;
   onKeyDownCapture: React.KeyboardEventHandler<HTMLDivElement>;
   onPointerDownCapture: React.PointerEventHandler<HTMLDivElement>;
 };
@@ -45,21 +43,6 @@ function getHTMLElementFromTarget(target: EventTarget | null): HTMLElement | nul
 function hasNonCollapsedSelection(): boolean {
   const selection = window.getSelection();
   return Boolean(selection && !selection.isCollapsed && selection.toString().trim());
-}
-
-function getSelectedCodeText(root: HTMLElement): string {
-  const selection = window.getSelection();
-  if (!selection || selection.isCollapsed) {
-    return "";
-  }
-
-  const anchorBlock = getHTMLElementFromTarget(selection.anchorNode)?.closest<HTMLElement>(CODE_BLOCK_BODY_SELECTOR);
-  const focusBlock = getHTMLElementFromTarget(selection.focusNode)?.closest<HTMLElement>(CODE_BLOCK_BODY_SELECTOR);
-  if (!anchorBlock || anchorBlock !== focusBlock || !root.contains(anchorBlock)) {
-    return "";
-  }
-
-  return selection.toString();
 }
 
 function isDisplayLatexElement(element: HTMLElement): boolean {
@@ -112,7 +95,7 @@ function resolveLatexCopySource(target: EventTarget | null, root: HTMLElement): 
     return "";
   }
 
-  return formatLatexSource(getLatexSource(copyElement), isDisplayLatexElement(copyElement));
+  return getCopyableMarkdownSource(copyElement) ?? formatLatexSource(getLatexSource(copyElement), isDisplayLatexElement(copyElement));
 }
 
 function resolveInlineCodeCopySource(target: EventTarget | null, root: HTMLElement): string {
@@ -177,6 +160,7 @@ export function useMarkdownCopy({ contentVersion, renderVersion }: UseMarkdownCo
     },
   });
   const rootRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => listenForMarkdownSelectionCopy(document), []);
   const pointerDownRef = React.useRef<{ x: number; y: number } | null>(null);
 
   React.useEffect(() => {
@@ -207,22 +191,6 @@ export function useMarkdownCopy({ contentVersion, renderVersion }: UseMarkdownCo
       return;
     }
     pointerDownRef.current = { x: event.clientX, y: event.clientY };
-  }, []);
-
-  const onCopyCapture = React.useCallback<React.ClipboardEventHandler<HTMLDivElement>>((event) => {
-    if (event.defaultPrevented) {
-      return;
-    }
-
-    const code = getSelectedCodeText(event.currentTarget);
-    if (!code) {
-      return;
-    }
-
-    event.clipboardData.clearData();
-    event.clipboardData.setData(CODE_BLOCK_PLAIN_TEXT_MIME, "1");
-    event.clipboardData.setData("text/plain", code);
-    event.preventDefault();
   }, []);
 
   const onClickCapture = React.useCallback<React.MouseEventHandler<HTMLDivElement>>(
@@ -293,7 +261,6 @@ export function useMarkdownCopy({ contentVersion, renderVersion }: UseMarkdownCo
   return {
     rootRef,
     onClickCapture,
-    onCopyCapture,
     onKeyDownCapture,
     onPointerDownCapture,
   };

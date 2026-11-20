@@ -116,7 +116,7 @@ function rewriteSharedFileContentURLs(content: string, shareID: string): string 
   }
   const encodedShareID = encodeURIComponent(normalizedShareID);
   return content.replace(
-    /(^|[\s("'=])\/api\/v1\/files\/([^/?#)\s"'<>]+)\/content([?#][^)\s"'<>]*)?/g,
+    /(^|[\s(<"'=])\/api\/v1\/files\/([^/?#)\s"'<>]+)\/content([?#][^)\s"'<>]*)?/g,
     (_match, prefix: string, fileID: string, suffix: string = "") =>
       `${prefix}/api/v1/shared-conversations/${encodedShareID}/files/${encodeURIComponent(fileID)}/content${suffix}`,
   );

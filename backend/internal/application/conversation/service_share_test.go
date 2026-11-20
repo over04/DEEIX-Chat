@@ -10,6 +10,21 @@ import (
 	"github.com/DEEIX-AI/DEEIX-Chat/backend/internal/repository"
 )
 
+func TestRewriteClonedFileLinksUsesTheClonedMessageAttachment(t *testing.T) {
+	source := model.Message{
+		Content:     "![image](/api/v1/files/file_original/content) ![other](/api/v1/files/file_other/content)",
+		Attachments: `[{"file_id":"file_original"}]`,
+	}
+	files := map[string]*model.FileObject{
+		"file_original": {FileID: "file_copy"},
+		"file_other":    {FileID: "file_other_copy"},
+	}
+	want := "![image](/api/v1/files/file_copy/content) ![other](/api/v1/files/file_other/content)"
+	if got := rewriteClonedFileLinks(source, files); got != want {
+		t.Fatalf("rewritten = %q, want %q", got, want)
+	}
+}
+
 func TestSharedMessagesIncludeFileUsesSnapshotAttachments(t *testing.T) {
 	messages := []model.Message{
 		{ID: 1, PublicID: "u1", Role: "user", Attachments: `[{"file_id":"file_a"}]`},

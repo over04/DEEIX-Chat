@@ -1416,6 +1416,62 @@ func (r *Repo) CompleteAssistantMessageWithGeneratedAttachments(
 	}))
 }
 
+// FinalizeInterruptedAssistantImages links the images of a newly interrupted
+// reply without changing its status, billing, or edit time.
+func (r *Repo) FinalizeInterruptedAssistantImages(ctx context.Context, owner, conversationID, messageID uint, original, markdown, contentType string, attachments []domainconversation.Attachment) (bool, error) {
+	var applied bool
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if len(attachments) > 0 {
+			if err := lockActiveFileObjectsForAttachments(tx, owner, attachments); err != nil {
+				return err
+			}
+		}
+		result := tx.Model(&models.Message{}).
+			Where("id = ? AND conversation_id = ? AND user_id = ? AND role = ? AND content = ?", messageID, conversationID, owner, "assistant", original).
+			Where("status IN ?", []string{"interrupted", "canceled"}).
+			UpdateColumns(map[string]any{"content": markdown, "content_type": contentType})
+		if result.Error != nil || result.RowsAffected == 0 {
+			return result.Error
+		}
+		if len(attachments) != 0 {
+			rows := make([]models.Attachment, 0, len(attachments))
+			fileIDs := make([]string, 0, len(attachments))
+			for _, item := range attachments {
+				item.MessageID, item.ConversationID, item.UserID = messageID, conversationID, owner
+				row := toAttachmentModel(&item)
+				rows = append(rows, row)
+				fileIDs = append(fileIDs, row.FileID)
+			}
+			var existingIDs []string
+			if err := tx.Model(&models.Attachment{}).
+				Where("message_id = ? AND file_id IN ? AND status = ?", messageID, fileIDs, "active").
+				Pluck("file_id", &existingIDs).Error; err != nil {
+				return err
+			}
+			attached := make(map[string]bool, len(existingIDs))
+			for _, id := range existingIDs {
+				attached[id] = true
+			}
+			fresh := rows[:0]
+			for _, row := range rows {
+				if attached[row.FileID] {
+					continue
+				}
+				attached[row.FileID] = true
+				fresh = append(fresh, row)
+			}
+			if len(fresh) != 0 {
+				if err := tx.Create(&fresh).Error; err != nil {
+					return err
+				}
+			}
+		}
+		applied = true
+		return nil
+	})
+	return applied && err == nil, dberror.Translate(err)
+}
+
 // UpdateMessageBilling 回填消息计费金额与计费快照。
 func (r *Repo) UpdateMessageBilling(ctx context.Context, messageID uint, billedCurrency string, billedNanousd int64, pricingSnapshot string) error {
 	if billedNanousd < 0 {

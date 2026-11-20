@@ -4,7 +4,6 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 import { isOneOf } from "@/shared/lib/type-guards";
-import { containsMarkdownMath } from "./streamdown-content";
 import {
   sanitizeHTMLStyle,
   sanitizeKatexHTMLStyle,
@@ -25,13 +24,7 @@ type MarkdownHTMLDetailsProps = React.DetailsHTMLAttributes<HTMLDetailsElement> 
   node?: unknown;
 };
 
-type MarkdownHTMLInlineRenderer = (source: string) => React.ReactNode;
-
-export const MarkdownHTMLInlineRendererContext = React.createContext<MarkdownHTMLInlineRenderer | null>(null);
 export const MarkdownFootnotesContext = React.createContext(false);
-
-const INLINE_MARKDOWN_STRONG_RE = /(\*\*|__)([^\n]+?)\1/g;
-const INLINE_MARKDOWN_SOURCE_MAX_LENGTH = 64_000;
 
 const KATEX_SPAN_CLASS_NAMES = [
   "katex",
@@ -82,170 +75,76 @@ function isKatexSpan(className: string | undefined, style: React.CSSProperties |
   ));
 }
 
-function getPlainInlineText(node: React.ReactNode): string | null {
-  let text = "";
-  let plain = true;
-
-  React.Children.forEach(node, (child) => {
-    if (!plain || child == null || typeof child === "boolean") {
-      return;
-    }
-    if (typeof child === "string" || typeof child === "number") {
-      text += String(child);
-      plain = text.length <= INLINE_MARKDOWN_SOURCE_MAX_LENGTH;
-      return;
-    }
-    if (React.isValidElement<{ children?: React.ReactNode }>(child) && child.type === React.Fragment) {
-      const fragmentText = getPlainInlineText(child.props.children);
-      if (fragmentText == null) {
-        plain = false;
-        return;
-      }
-      text += fragmentText;
-      plain = text.length <= INLINE_MARKDOWN_SOURCE_MAX_LENGTH;
-      return;
-    }
-    plain = false;
-  });
-
-  return plain ? text : null;
-}
-
-function renderInlineStrongText(source: string): React.ReactNode {
-  if (source.length > INLINE_MARKDOWN_SOURCE_MAX_LENGTH || (!source.includes("**") && !source.includes("__"))) {
-    return source;
-  }
-
-  const nodes: React.ReactNode[] = [];
-  let cursor = 0;
-  INLINE_MARKDOWN_STRONG_RE.lastIndex = 0;
-  for (const match of source.matchAll(INLINE_MARKDOWN_STRONG_RE)) {
-    const [raw, _delimiter, content] = match;
-    if (!content.trim() || match.index == null) {
-      continue;
-    }
-    if (match.index > cursor) {
-      nodes.push(source.slice(cursor, match.index));
-    }
-    nodes.push(
-      <strong
-        key={`strong-${match.index}`}
-        className="font-bold text-foreground"
-        style={{ fontWeight: "var(--font-chat-strong-weight)" }}
-      >
-        {content}
-      </strong>,
-    );
-    cursor = match.index + raw.length;
-  }
-
-  if (cursor === 0) {
-    return source;
-  }
-  if (cursor < source.length) {
-    nodes.push(source.slice(cursor));
-  }
-  return nodes;
-}
-
-function renderInlineStrongChildren(children: React.ReactNode): React.ReactNode {
-  return React.Children.map(children, (child) => {
-    if (typeof child === "string" || typeof child === "number") {
-      return renderInlineStrongText(String(child));
-    }
-    if (!React.isValidElement<{ children?: React.ReactNode }>(child) || !("children" in child.props)) {
-      return child;
-    }
-    return React.cloneElement(child, undefined, renderInlineStrongChildren(child.props.children));
-  });
-}
-
-function useHTMLMarkdownChildren(children: React.ReactNode): React.ReactNode {
-  const renderInlineMarkdown = React.useContext(MarkdownHTMLInlineRendererContext);
-  const source = React.useMemo(() => getPlainInlineText(children), [children]);
-
-  if (source != null && !source.includes("\n") && containsMarkdownMath(source)) {
-    return renderInlineMarkdown?.(source) ?? children;
-  }
-  return renderInlineStrongChildren(children);
-}
-
-export function MarkdownHTMLDiv({ children, className, node: _node, style }: MarkdownHTMLBlockProps) {
-  const renderedChildren = useHTMLMarkdownChildren(children);
+export function MarkdownHTMLDiv({ children, className, node: _node, style, ...props }: MarkdownHTMLBlockProps) {
   return (
-    <div className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
-      {renderedChildren}
+    <div {...props} className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
+      {children}
     </div>
   );
 }
 
 export function MarkdownHTMLSection({ children, className, node: _node, style, ...props }: MarkdownHTMLBlockProps) {
-  const renderedChildren = useHTMLMarkdownChildren(children);
   const footnotes = "data-footnotes" in props || className?.split(/\s+/).includes("footnotes") === true;
   const section = (
     <section {...props} className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
-      {renderedChildren}
+      {children}
     </section>
   );
 
   return footnotes ? <MarkdownFootnotesContext.Provider value>{section}</MarkdownFootnotesContext.Provider> : section;
 }
 
-export function MarkdownHTMLArticle({ children, className, node: _node, style }: MarkdownHTMLBlockProps) {
-  const renderedChildren = useHTMLMarkdownChildren(children);
+export function MarkdownHTMLArticle({ children, className, node: _node, style, ...props }: MarkdownHTMLBlockProps) {
   return (
-    <article className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
-      {renderedChildren}
+    <article {...props} className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
+      {children}
     </article>
   );
 }
 
-export function MarkdownHTMLAside({ children, className, node: _node, style }: MarkdownHTMLBlockProps) {
-  const renderedChildren = useHTMLMarkdownChildren(children);
+export function MarkdownHTMLAside({ children, className, node: _node, style, ...props }: MarkdownHTMLBlockProps) {
   return (
-    <aside className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
-      {renderedChildren}
+    <aside {...props} className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
+      {children}
     </aside>
   );
 }
 
-export function MarkdownHTMLMain({ children, className, node: _node, style }: MarkdownHTMLBlockProps) {
-  const renderedChildren = useHTMLMarkdownChildren(children);
+export function MarkdownHTMLMain({ children, className, node: _node, style, ...props }: MarkdownHTMLBlockProps) {
   return (
-    <main className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
-      {renderedChildren}
+    <main {...props} className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
+      {children}
     </main>
   );
 }
 
-export function MarkdownHTMLDetails({ children, className, node: _node, open, style }: MarkdownHTMLDetailsProps) {
-  const renderedChildren = useHTMLMarkdownChildren(children);
+export function MarkdownHTMLDetails({ children, className, node: _node, open, style, ...props }: MarkdownHTMLDetailsProps) {
   return (
-    <details className={cn("min-w-0 max-w-full", className)} open={open} style={sanitizeHTMLStyle(style)}>
-      {renderedChildren}
+    <details {...props} className={cn("min-w-0 max-w-full", className)} open={open} style={sanitizeHTMLStyle(style)}>
+      {children}
     </details>
   );
 }
 
-export function MarkdownHTMLSummary({ children, className, node: _node, style }: MarkdownHTMLBlockProps) {
+export function MarkdownHTMLSummary({ children, className, node: _node, style, ...props }: MarkdownHTMLBlockProps) {
   return (
-    <summary className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
+    <summary {...props} className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
       {children}
     </summary>
   );
 }
 
-export function MarkdownHTMLSpan({ children, className, node: _node, style }: MarkdownHTMLInlineProps) {
+export function MarkdownHTMLSpan({ children, className, node: _node, style, ...props }: MarkdownHTMLInlineProps) {
   if (isKatexSpan(className, style)) {
     return (
-      <span className={className} style={sanitizeKatexHTMLStyle(style)}>
+      <span {...props} className={className} style={sanitizeKatexHTMLStyle(style)}>
         {children}
       </span>
     );
   }
 
   return (
-    <span className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
+    <span {...props} className={cn("min-w-0 max-w-full", className)} style={sanitizeHTMLStyle(style)}>
       {children}
     </span>
   );

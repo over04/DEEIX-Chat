@@ -382,7 +382,11 @@ func (h *Handler) StreamMessage(c *gin.Context) {
 	}
 
 	defer h.service.FinishMessageGeneration(generationCtx, input.ClientRunID)
-	result, err := h.service.StreamMessage(generationCtx, input, func(delta string) error {
+	var imageStream appconversation.AssistantMarkdownImageStream
+	emitDelta := func(delta string) error {
+		if delta == "" {
+			return nil
+		}
 		owned, flushErr := flushStreamEvent(map[string]any{
 			"type":  "delta",
 			"delta": delta,
@@ -391,7 +395,13 @@ func (h *Handler) StreamMessage(c *gin.Context) {
 			return appconversation.ErrMessageGenerationInterrupted
 		}
 		return flushErr
+	}
+	result, err := h.service.StreamMessage(generationCtx, input, func(delta string) error {
+		return emitDelta(imageStream.Write(delta))
 	})
+	if err == nil && result != nil && !result.IsModerationBlocked() {
+		_ = emitDelta(imageStream.Finish())
+	}
 
 	if err == nil && result != nil && result.IsModerationBlocked() {
 		// 即使实时 OnEvent 路径漏发，也要确保发送终止事件。

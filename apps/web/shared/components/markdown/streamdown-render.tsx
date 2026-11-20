@@ -8,6 +8,7 @@ import {
   type AllowedTags,
   type Components,
   defaultRehypePlugins,
+  defaultRemarkPlugins,
   type IconMap,
   type PluginConfig,
   Streamdown,
@@ -64,13 +65,12 @@ import {
   MarkdownHTMLAside,
   MarkdownHTMLDetails,
   MarkdownHTMLDiv,
-  MarkdownHTMLInlineRendererContext,
   MarkdownHTMLMain,
   MarkdownHTMLSection,
   MarkdownHTMLSpan,
   MarkdownHTMLSummary,
 } from "./streamdown-html";
-import { renderRawHTMLMathRehypePlugin } from "./streamdown-html-math";
+import { normalizeQualifiedXmlWrappers, remarkMarkdownInMarkup, transformOutsideLiteralMarkup } from "./streamdown-mixed-markup";
 import { MarkdownMermaidPendingContext, STREAMDOWN_MERMAID_OPTIONS } from "./streamdown-mermaid";
 import {
   createStreamdownTooltipIcon,
@@ -87,6 +87,8 @@ import { UIWidgetCompletionProvider } from "./ui-blocks";
 import { UIBlockOpenProvider } from "./ui-blocks/ui-block-actions";
 import { type UIBlockStateBinding, UIBlockStateProvider, useMessageUIBlockStateBinding } from "./ui-blocks/ui-block-state";
 import { useMarkdownCopy } from "./use-markdown-copy";
+import { MarkdownCopyBoundary, SourceTrackedStreamdownBlock } from "./markdown-copy-boundary";
+import { rehypeMarkdownCopySource, sourceOffsetMap } from "./markdown-source";
 
 type StreamdownRenderProps = {
   content: unknown;
@@ -202,6 +204,8 @@ function useStreamdownIcons(): Partial<IconMap> {
   );
 }
 
+const STREAMDOWN_REMARK_PLUGINS = [...Object.values(defaultRemarkPlugins), remarkMarkdownInMarkup];
+
 const STREAMDOWN_REMEND = {
   linkMode: "text-only",
 } as const;
@@ -287,12 +291,12 @@ function buildStreamdownRehypePlugins(includeSourcePositions = false): Streamdow
   const sanitizeWithHTMLTags: StreamdownRehypePlugin = [sanitizePlugin, schema];
 
   return [
-    renderRawHTMLMathRehypePlugin,
     [escapeUnsupportedInlineHTMLRehypePlugin, tagNames],
     defaultRehypePlugins.raw,
     sanitizeWithHTMLTags,
     ...(includeSourcePositions ? [markdownSourcePositionRehypePlugin] : []),
     normalizeBareURLRehypePlugin,
+    rehypeMarkdownCopySource,
   ];
 }
 const STREAMDOWN_REHYPE_PLUGINS = buildStreamdownRehypePlugins();
@@ -423,28 +427,30 @@ const THINKING_STREAMDOWN_COMPONENTS = {
 
 const USER_BLOCK_LINE_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|\||```|~~~)/;
 
-// In a typed message a single Enter means a new paragraph, but Markdown folds
-// it into the previous line. Promote single line breaks between two plain
-// text lines to paragraph breaks; list items, quotes, headings, table rows and
-// fenced code keep their single newlines because there they are structural.
+// User line breaks are visual only. Never insert a new paragraph inside math,
+// fenced code, or the literal parts of a markup container.
 function normalizeUserLineBreaks(content: string): string {
   const lines = content.split("\n");
   const out: string[] = [];
-  let inFence = false;
+  let fence: { marker: string; length: number } | undefined;
+  let inDisplayMath = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
     out.push(line);
-    if (/^\s*(?:```|~~~)/.test(line)) {
-      inFence = !inFence;
+    const marker = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (marker && !inDisplayMath) {
+      if (!fence) fence = { marker: marker[1][0], length: marker[1].length };
+      else if (marker[1][0] === fence.marker && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
+      continue;
+    }
+    if (!fence && /^[\t ]*\$\$[\t ]*\r?$/.test(line)) {
+      inDisplayMath = !inDisplayMath;
       continue;
     }
     const next = lines[index + 1];
-    if (inFence || next === undefined || line.trim() === "" || next.trim() === "") {
-      continue;
-    }
-    if (!USER_BLOCK_LINE_RE.test(line) && !USER_BLOCK_LINE_RE.test(next)) {
-      out.push("");
-    }
+    if (fence || inDisplayMath || next === undefined || line.trim() === "" || next.trim() === "") continue;
+    if (/^\s*(?:\$\$|<[/!A-Za-z])/.test(line) || /^\s*(?:\$\$|<[/!A-Za-z])/.test(next)) continue;
+    if (!USER_BLOCK_LINE_RE.test(line) && !USER_BLOCK_LINE_RE.test(next)) out.push("");
   }
   return out.join("\n");
 }
@@ -454,14 +460,13 @@ function normalizeStreamdownContent(
   preserveSourceLines = false,
   streaming = false,
 ): string {
-  const escapedContent = escapeNonMathDollars(
-    normalizeEscapedHTMLAttributeQuotes(normalizeContent(content)),
-  );
-  const normalizedContent = normalizeMermaidBlocks(
-    normalizeLatexUnicodeSymbols(
-      preserveSourceLines ? escapedContent : normalizeMathDelimiters(escapedContent),
-    ),
-  );
+  const markup = normalizeEscapedHTMLAttributeQuotes(normalizeQualifiedXmlWrappers(normalizeContent(content)));
+  const normalizedContent = transformOutsideLiteralMarkup(markup, (part) => {
+    const escaped = escapeNonMathDollars(part);
+    return normalizeMermaidBlocks(normalizeLatexUnicodeSymbols(
+      preserveSourceLines ? escaped : normalizeMathDelimiters(escaped),
+    ));
+  });
   const fenceNormalizedContent = preserveSourceLines
     ? normalizedContent
     : normalizeNestedCodeFences(normalizedContent);
@@ -663,81 +668,30 @@ function ThinkingSegmentBlock({
           />
         </AccordionTrigger>
         <AccordionContent className="px-0 pb-0 pt-1.5 duration-[350ms] ease-in-out">
-          <HTMLInlineMarkdownProvider
+          <Streamdown
+            BlockComponent={SourceTrackedStreamdownBlock}
             className={cn(THINKING_MARKDOWN_CLASSNAME, "text-[12px] leading-6 text-muted-foreground/84")}
+            codeBlockMaxHeight={STREAMDOWN_CODE_BLOCK_MAX_HEIGHT}
             components={THINKING_STREAMDOWN_COMPONENTS}
+            controls={STREAMDOWN_CONTROLS}
+            icons={icons}
             plugins={plugins}
+            rehypePlugins={STREAMDOWN_REHYPE_PLUGINS}
+            remarkPlugins={STREAMDOWN_REMARK_PLUGINS}
+            remend={STREAMDOWN_REMEND}
+            mermaid={STREAMDOWN_MERMAID_OPTIONS}
+            mode={active ? "streaming" : "static"}
+            parseIncompleteMarkdown={active}
+            shikiTheme={["github-light", "github-dark"]}
+            animated={false}
+            isAnimating={active}
+            translations={translations}
           >
-            <Streamdown
-              className={cn(THINKING_MARKDOWN_CLASSNAME, "text-[12px] leading-6 text-muted-foreground/84")}
-              codeBlockMaxHeight={STREAMDOWN_CODE_BLOCK_MAX_HEIGHT}
-              components={THINKING_STREAMDOWN_COMPONENTS}
-              controls={STREAMDOWN_CONTROLS}
-              icons={icons}
-              plugins={plugins}
-              rehypePlugins={STREAMDOWN_REHYPE_PLUGINS}
-              remend={STREAMDOWN_REMEND}
-              mermaid={STREAMDOWN_MERMAID_OPTIONS}
-              mode={active ? "streaming" : "static"}
-              normalizeHtmlIndentation
-              parseIncompleteMarkdown={active}
-              shikiTheme={["github-light", "github-dark"]}
-              animated={false}
-              isAnimating={active}
-              translations={translations}
-            >
-              {content}
-            </Streamdown>
-          </HTMLInlineMarkdownProvider>
+            {content}
+          </Streamdown>
         </AccordionContent>
       </AccordionItem>
     </Accordion>
-  );
-}
-
-function HTMLInlineMarkdownProvider({
-  children,
-  className,
-  components,
-  plugins,
-}: {
-  children: React.ReactNode;
-  className: string;
-  components: Components;
-  plugins: PluginConfig;
-}) {
-  const translations = useStreamdownTranslations();
-  const renderInlineMarkdown = React.useCallback(
-    (source: string) => (
-      <MarkdownHTMLInlineRendererContext.Provider value={null}>
-        <Streamdown
-          className={className}
-          codeBlockMaxHeight={STREAMDOWN_CODE_BLOCK_MAX_HEIGHT}
-          components={components}
-          controls={false}
-          plugins={plugins}
-          rehypePlugins={STREAMDOWN_REHYPE_PLUGINS}
-          remend={STREAMDOWN_REMEND}
-          mermaid={STREAMDOWN_MERMAID_OPTIONS}
-          linkSafety={STREAMDOWN_LINK_SAFETY}
-          mode="static"
-          parseIncompleteMarkdown={false}
-          shikiTheme={["github-light", "github-dark"]}
-          animated={false}
-          isAnimating={false}
-          translations={translations}
-        >
-          {source}
-        </Streamdown>
-      </MarkdownHTMLInlineRendererContext.Provider>
-    ),
-    [className, components, plugins, translations],
-  );
-
-  return (
-    <MarkdownHTMLInlineRendererContext.Provider value={renderInlineMarkdown}>
-      {children}
-    </MarkdownHTMLInlineRendererContext.Provider>
   );
 }
 
@@ -774,21 +728,29 @@ export const StreamdownRender = React.memo(function StreamdownRender({
   const segments = React.useMemo(
     () =>
       parseStreamdownSegments(normalizedContent, {
-        normalizeHTMLVisualFences: !sourcePositions,
+        normalizeHTMLVisualFences: false,
         parseThinking: variant !== "user",
       }),
-    [normalizedContent, sourcePositions, variant],
+    [normalizedContent, variant],
   );
   const {
     rootRef: markdownCopyRootRef,
     onClickCapture: handleMarkdownCopyClickCapture,
-    onCopyCapture: handleMarkdownCopyCapture,
     onKeyDownCapture: handleMarkdownCopyKeyDownCapture,
     onPointerDownCapture: handleMarkdownCopyPointerDownCapture,
   } = useMarkdownCopy({
     contentVersion: normalizedContent,
     renderVersion: plugins,
   });
+  const copyDocument = React.useMemo(() => ({ source: normalizeContent(content) }), [content]);
+  const copyMap = React.useMemo(() => sourceOffsetMap(copyDocument.source, normalizedContent), [copyDocument, normalizedContent]);
+  const sourceMapFor = React.useCallback((segment: RenderSegment, input: string) => {
+    const localMap = sourceOffsetMap(normalizedContent.slice(segment.start, segment.end), input);
+    return (offset: number, bias: "start" | "end") => {
+      const local = localMap(offset, bias);
+      return local == null ? undefined : copyMap(segment.start + local, bias);
+    };
+  }, [copyMap, normalizedContent]);
   const thinkingSegments = React.useMemo(
     () => segments.filter((segment): segment is Extract<RenderSegment, { type: "thinking" }> => segment.type === "thinking"),
     [segments],
@@ -830,58 +792,61 @@ export const StreamdownRender = React.memo(function StreamdownRender({
       className={cn("chat-font-content min-w-0 max-w-full overflow-hidden text-foreground [overflow-wrap:anywhere]", contentSpacingClassName, className)}
       data-chat-markdown-scope=""
       onClickCapture={handleMarkdownCopyClickCapture}
-      onCopyCapture={handleMarkdownCopyCapture}
       onKeyDownCapture={handleMarkdownCopyKeyDownCapture}
       onPointerDownCapture={handleMarkdownCopyPointerDownCapture}
     >
       <StreamdownAdapterStyles />
       <MarkdownMermaidPendingContext.Provider value={mermaidPending}>
         <MarkdownTableStreamingContext.Provider value={streaming}>
-          {mergedThinkingContent ? (
-            <ThinkingSegmentBlock
-              content={mergedThinkingContent}
-              incomplete={hasIncompleteThinking}
-              plugins={plugins}
-              streaming={streaming}
-              autoExpand={autoExpandThinking}
-            />
+          {mergedThinkingContent && thinkingSegments[0] ? (
+            <MarkdownCopyBoundary
+              document={copyDocument}
+              map={sourceMapFor(thinkingSegments[0], mergedThinkingContent)}
+              input={mergedThinkingContent}
+              streaming={streaming && hasIncompleteThinking}
+            >
+              <ThinkingSegmentBlock
+                content={mergedThinkingContent}
+                incomplete={hasIncompleteThinking}
+                plugins={plugins}
+                streaming={streaming}
+                autoExpand={autoExpandThinking}
+              />
+            </MarkdownCopyBoundary>
           ) : null}
           {markdownSegments.map((segment, index) => (
             <MarkdownArtifactActionsContext.Provider key={`markdown-${index}`} value={artifactActions ?? null}>
               <MarkdownImageActionsContext.Provider value={imageActions ?? null}>
                 <UIWidgetCompletionProvider complete={completeWidgets}>
-                <UIBlockOpenProvider open={artifactActions?.onOpenUIBlock ?? null}>
-                <UIBlockStateHost uiBlockState={messageUIBlockState}>
-                  <HTMLInlineMarkdownProvider
-                    className={activeMarkdownClassName}
-                    components={components}
-                    plugins={plugins}
-                  >
-                    <Streamdown
-                      className={activeMarkdownClassName}
-                      codeBlockMaxHeight={STREAMDOWN_CODE_BLOCK_MAX_HEIGHT}
-                      components={components}
-                      controls={STREAMDOWN_CONTROLS}
-                      icons={icons}
-                      plugins={plugins}
-                      rehypePlugins={rehypePlugins}
-                      remend={STREAMDOWN_REMEND}
-                      mermaid={STREAMDOWN_MERMAID_OPTIONS}
-                      linkSafety={STREAMDOWN_LINK_SAFETY}
-                      caret={streaming ? STREAMDOWN_CARET : undefined}
-                      mode={streaming ? "streaming" : "static"}
-                      normalizeHtmlIndentation
-                      parseIncompleteMarkdown={streaming}
-                      shikiTheme={["github-light", "github-dark"]}
-                      animated={false}
-                      isAnimating={streaming}
-                      translations={translations}
-                    >
-                      {segment.content}
-                    </Streamdown>
-                  </HTMLInlineMarkdownProvider>
-                </UIBlockStateHost>
-                </UIBlockOpenProvider>
+                  <UIBlockOpenProvider open={artifactActions?.onOpenUIBlock ?? null}>
+                    <UIBlockStateHost uiBlockState={messageUIBlockState}>
+                      <MarkdownCopyBoundary document={copyDocument} map={sourceMapFor(segment, segment.content)} input={segment.content} streaming={streaming}>
+                        <Streamdown
+                          BlockComponent={SourceTrackedStreamdownBlock}
+                          className={activeMarkdownClassName}
+                          codeBlockMaxHeight={STREAMDOWN_CODE_BLOCK_MAX_HEIGHT}
+                          components={components}
+                          controls={STREAMDOWN_CONTROLS}
+                          icons={icons}
+                          plugins={plugins}
+                          rehypePlugins={rehypePlugins}
+                          remarkPlugins={STREAMDOWN_REMARK_PLUGINS}
+                          remend={STREAMDOWN_REMEND}
+                          mermaid={STREAMDOWN_MERMAID_OPTIONS}
+                          linkSafety={STREAMDOWN_LINK_SAFETY}
+                          caret={streaming ? STREAMDOWN_CARET : undefined}
+                          mode={streaming ? "streaming" : "static"}
+                          parseIncompleteMarkdown={streaming}
+                          shikiTheme={["github-light", "github-dark"]}
+                          animated={false}
+                          isAnimating={streaming}
+                          translations={translations}
+                        >
+                          {segment.content}
+                        </Streamdown>
+                      </MarkdownCopyBoundary>
+                    </UIBlockStateHost>
+                  </UIBlockOpenProvider>
                 </UIWidgetCompletionProvider>
               </MarkdownImageActionsContext.Provider>
             </MarkdownArtifactActionsContext.Provider>

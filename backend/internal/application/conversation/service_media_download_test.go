@@ -3,10 +3,12 @@ package conversation
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"image"
 	"image/png"
+	"strings"
 	"testing"
 
 	"github.com/DEEIX-AI/DEEIX-Chat/backend/internal/application/channel"
@@ -128,6 +130,81 @@ func TestSaveAssistantImagesIgnoresUserUploadLimits(t *testing.T) {
 	}
 	if result == nil || len(result.AttachmentRows) != 1 || result.AttachmentRows[0].FileSize != int64(encoded.Len()) {
 		t.Fatalf("unexpected saved image: %#v", result)
+	}
+}
+
+func TestAssistantMarkdownImagesBecomeOneStoredAttachment(t *testing.T) {
+	var imageData bytes.Buffer
+	if err := png.Encode(&imageData, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.NewRuntime(config.Config{MaxUploadFileBytes: 16})
+	store := objectstorage.NewLocal(t.TempDir())
+	upload := appupload.NewServiceWithRuntime(cfg, generatedImageUploadRepository{}, nil, appupload.Hooks{}, appupload.ErrorSet{FileTooLarge: ErrFileTooLarge}, "test")
+	upload.SetObjectStoreProvider(&conversationTestStoreProvider{store: store})
+	service := &Service{cfg: cfg, uploadSvc: upload}
+	data := "data:image/png;base64," + base64.StdEncoding.EncodeToString(imageData.Bytes())
+	before := "  Before **text**\n\n![first](" + data + ") and ![second](" + data + " \"with title\")\n\nAfter.\n"
+	result, err := service.normalizeAssistantImageContent(t.Context(), assistantImageContentInput{UserID: 1, ConversationID: 9, AssistantMessageID: 11, Content: before})
+	if err != nil || result == nil {
+		t.Fatalf("normalize: %+v %v", result, err)
+	}
+	if result.ContentType != "mixed" || len(result.AttachmentRows) != 1 || len(result.AttachmentSnapshots) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	file := result.AttachmentRows[0]
+	if file.ConversationID != 9 || file.MessageID != 11 || file.FileSize != int64(imageData.Len()) {
+		t.Fatalf("attachment = %+v", file)
+	}
+	want := strings.ReplaceAll(before, data, "/api/v1/files/"+file.FileID+"/content")
+	if result.Content != want {
+		t.Fatalf("content = %q, want %q", result.Content, want)
+	}
+	stored, _, err := store.Open(t.Context(), file.StoragePath)
+	if err != nil {
+		t.Fatalf("open stored image: %v", err)
+	}
+	defer stored.Close()
+	var saved bytes.Buffer
+	if _, err := saved.ReadFrom(stored); err != nil || !bytes.Equal(saved.Bytes(), imageData.Bytes()) {
+		t.Fatalf("stored image bytes differ: %v", err)
+	}
+}
+
+type partialGeneratedImageUploadRepository struct {
+	generatedImageUploadRepository
+	attempts int
+}
+
+func (r *partialGeneratedImageUploadRepository) CreateFileObjectAndConsumeQuota(ctx context.Context, file *model.FileObject, limit int64) (*model.StorageQuota, error) {
+	r.attempts++
+	if r.attempts == 2 {
+		return nil, errors.New("object write failed")
+	}
+	return r.generatedImageUploadRepository.CreateFileObjectAndConsumeQuota(ctx, file, limit)
+}
+
+func TestAssistantMarkdownImageFailureOnlyMarksFailedImage(t *testing.T) {
+	cfg := config.NewRuntime(config.Config{})
+	repo := &partialGeneratedImageUploadRepository{}
+	upload := appupload.NewServiceWithRuntime(cfg, repo, nil, appupload.Hooks{}, appupload.ErrorSet{}, "test")
+	upload.SetObjectStoreProvider(&conversationTestStoreProvider{store: objectstorage.NewLocal(t.TempDir())})
+	service := &Service{cfg: cfg, uploadSvc: upload}
+	var first, second bytes.Buffer
+	if err := png.Encode(&first, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(&second, image.NewRGBA(image.Rect(0, 0, 3, 2))); err != nil {
+		t.Fatal(err)
+	}
+	source := "![first](data:image/png;base64," + base64.StdEncoding.EncodeToString(first.Bytes()) + ") ![second](data:image/png;base64," + base64.StdEncoding.EncodeToString(second.Bytes()) + ")"
+	result, err := service.normalizeAssistantImageContent(t.Context(), assistantImageContentInput{UserID: 1, Content: source})
+	if err != nil || result == nil || len(result.AttachmentRows) != 1 {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+	want := "![first](/api/v1/files/" + result.AttachmentRows[0].FileID + "/content) ![second](" + assistantImageFailedURL + ")"
+	if result.Content != want {
+		t.Fatalf("content = %q, want %q", result.Content, want)
 	}
 }
 

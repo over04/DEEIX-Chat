@@ -43,8 +43,6 @@ import { ConversationShareExportIconDropdown } from "@/entities/conversation";
 import { useCopyAction } from "@/shared/components/copy-action";
 import type { FileContentLoader } from "@/entities/file";
 import { StreamdownRender } from "@/shared/components/markdown/streamdown-render";
-import { messageUIBlocksText, useUIBlockRegistry } from "@/shared/components/markdown/ui-blocks";
-import { isUIBlockState } from "@/shared/components/markdown/ui-blocks/ui-block-state";
 import { PoweredByDeeix } from "@/shared/components/powered-by-deeix";
 import { useBranding } from "@/shared/config/branding-provider";
 import type { BillingDisplayCurrency } from "@/entities/billing";
@@ -400,18 +398,7 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
   );
 
   const copyKey = item.publicID || item.key;
-  const uiBlockRegistry = useUIBlockRegistry();
-  // Interactive blocks are copied as readable text in their current state, not
-  // as block source: the copy is for pasting where blocks do not render.
-  const onCopy = React.useCallback(async () => {
-    const text = isUser
-      ? item.content
-      : messageUIBlocksText(item.content, uiBlockRegistry, (blockKey) => {
-          const saved = uiBlockStateBinding ? uiBlockStateBinding.read(blockKey) : item.uiState?.[blockKey];
-          return isUIBlockState(saved) ? saved : undefined;
-        });
-    await copy(text, { key: copyKey });
-  }, [copy, copyKey, isUser, item.content, item.uiState, uiBlockRegistry, uiBlockStateBinding]);
+  const onCopy = React.useCallback(() => copy(item.content, { key: copyKey }), [copy, copyKey, item.content]);
 
   if (isUser) {
     return (

@@ -311,6 +311,9 @@ func (s *Service) sendMessageInternal(
 				}
 				cancelModeration()
 			}
+			if retainedOutput && result != nil && !result.IsModerationBlocked() {
+				s.persistInterruptedAssistantImages(ctx, result)
+			}
 		}
 		runState.finalize(ctx, retErr)
 		if retErr != nil && result == nil && userMessage != nil && assistantMessage != nil {

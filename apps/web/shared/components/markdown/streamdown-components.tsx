@@ -30,6 +30,8 @@ import { MarkdownWidgetHost, UI_BLOCK_FENCE_LANGUAGE, UIBlockHost } from "./ui-b
 const DEFAULT_CODE_BLOCK_LANGUAGE = "text";
 // remend (streamdown >= 2.7) rewrites a half-streamed image to this sentinel src instead of dropping it.
 const INCOMPLETE_IMAGE_SRC = "streamdown:incomplete-image";
+const PENDING_ATTACHMENT_SRC = "#deeix-inline-image-pending";
+const UNAVAILABLE_ATTACHMENT_SRC = "#deeix-inline-image-unavailable";
 const CODE_BLOCK_ACTION_BUTTON_CLASSNAME =
   "size-5 cursor-pointer rounded-none p-1 text-muted-foreground transition-all outline-none hover:bg-foreground/[0.04] hover:text-foreground focus-visible:bg-foreground/[0.04] focus-visible:text-foreground focus-visible:ring-0 disabled:cursor-not-allowed disabled:opacity-50";
 
@@ -46,6 +48,8 @@ type MarkdownCodePreProps = React.HTMLAttributes<HTMLPreElement> & {
   children?: React.ReactNode;
   node?: unknown;
   "data-markdown-source-line"?: string | number;
+  "data-md-range"?: string;
+  "data-md-atomic"?: string;
 };
 
 type StreamdownCodeChildProps = {
@@ -59,7 +63,7 @@ type MarkdownLinkProps = React.AnchorHTMLAttributes<HTMLAnchorElement> & {
   href?: string;
 };
 
-type MarkdownImageProps = React.ImgHTMLAttributes<HTMLImageElement>;
+type MarkdownImageProps = React.ImgHTMLAttributes<HTMLImageElement> & { "data-md-range"?: string; "data-md-atomic"?: string; node?: unknown };
 
 export type MarkdownImageActions = {
   canEditImage?: (src: string) => boolean;
@@ -502,7 +506,8 @@ function isFootnoteBackrefElement(node: React.ReactNode): boolean {
   );
 }
 
-export function MarkdownCodePre({ children, node: _node, "data-markdown-source-line": sourceLine }: MarkdownCodePreProps) {
+export function MarkdownCodePre({ children, node: _node, "data-markdown-source-line": sourceLine, "data-md-range": sourceRange, "data-md-atomic": atomic }: MarkdownCodePreProps) {
+  const sourceProps = { "data-md-range": sourceRange, "data-md-atomic": atomic };
   const streaming = React.useContext(MarkdownTableStreamingContext);
   const mermaidPending = React.useContext(MarkdownMermaidPendingContext);
   const childElement = React.isValidElement<StreamdownCodeChildProps>(children) ? ensureCodeBlockLanguage(children) : null;
@@ -512,12 +517,12 @@ export function MarkdownCodePre({ children, node: _node, "data-markdown-source-l
   const artifactPreviewable = Boolean(resolveArtifactPreviewKind(language, codeContent));
 
   if (!childElement) {
-    return children;
+    return <pre {...sourceProps}>{children}</pre>;
   }
 
   if (language === UI_BLOCK_FENCE_LANGUAGE) {
     return (
-      <div className="w-full" data-markdown-source-line={sourceLine}>
+      <div {...sourceProps} className="w-full" data-markdown-source-line={sourceLine}>
         <UIBlockHost raw={codeContent} streaming={streaming} />
       </div>
     );
@@ -525,7 +530,7 @@ export function MarkdownCodePre({ children, node: _node, "data-markdown-source-l
 
   if (language === UI_WIDGET_FENCE_LANGUAGE) {
     return (
-      <div className="w-full" data-markdown-source-line={sourceLine}>
+      <div {...sourceProps} className="w-full" data-markdown-source-line={sourceLine}>
         <MarkdownWidgetHost raw={codeContent} streaming={streaming} />
       </div>
     );
@@ -538,6 +543,7 @@ export function MarkdownCodePre({ children, node: _node, "data-markdown-source-l
     return (
       <div
         className="relative w-full"
+        {...sourceProps}
         data-markdown-mermaid={mermaidPending ? "pending" : ""}
         data-markdown-source-line={sourceLine}
       >
@@ -548,7 +554,7 @@ export function MarkdownCodePre({ children, node: _node, "data-markdown-source-l
   }
 
   return (
-    <div className="relative w-full" data-markdown-source-line={sourceLine}>
+    <div {...sourceProps} className="relative w-full" data-markdown-source-line={sourceLine}>
       {!mermaid ? <CodeBlockActions code={codeContent} language={language} previewable={artifactPreviewable} /> : null}
       {codeBlock}
     </div>
@@ -692,10 +698,12 @@ export function MarkdownSup({ children, className, node: _node, style, ...props 
   );
 }
 
-export function MarkdownImage({ alt, className, onError, onLoad, src: srcProp, ...props }: MarkdownImageProps) {
+export function MarkdownImage({ alt, className, onError, onLoad, src: srcProp, node: _node, "data-md-range": sourceRange, "data-md-atomic": atomic, ...props }: MarkdownImageProps) {
+  const sourceProps = { "data-md-range": sourceRange, "data-md-atomic": atomic };
   // Markdown rendering only produces string src; Blob src is out of scope.
-  const incomplete = srcProp === INCOMPLETE_IMAGE_SRC;
-  const src = typeof srcProp === "string" && !incomplete ? srcProp : undefined;
+  const incomplete = srcProp === INCOMPLETE_IMAGE_SRC || srcProp === PENDING_ATTACHMENT_SRC;
+  const unavailable = srcProp === UNAVAILABLE_ATTACHMENT_SRC;
+  const src = typeof srcProp === "string" && !incomplete && !unavailable ? srcProp : undefined;
   const t = useTranslations("chat.markdown");
   const insideLink = React.useContext(StreamdownLinkContext);
   const imageActions = React.useContext(MarkdownImageActionsContext);
@@ -705,7 +713,7 @@ export function MarkdownImage({ alt, className, onError, onLoad, src: srcProp, .
   const [loadedSrc, setLoadedSrc] = React.useState("");
   const [erroredSrc, setErroredSrc] = React.useState("");
   const loaded = Boolean(displaySrc) && loadedSrc === displaySrc;
-  const failed = fetchFailed || (Boolean(displaySrc) && erroredSrc === displaySrc);
+  const failed = unavailable || fetchFailed || (Boolean(displaySrc) && erroredSrc === displaySrc);
 
   const handleLoad = React.useCallback(
     (event: React.SyntheticEvent<HTMLImageElement>) => {
@@ -747,6 +755,7 @@ export function MarkdownImage({ alt, className, onError, onLoad, src: srcProp, .
     return (
       <span
         className={cn("group relative my-4 block w-fit max-w-full sm:max-w-[32rem]", className)}
+        {...sourceProps}
         data-incomplete="true"
         data-streamdown="image-wrapper"
       >
@@ -755,18 +764,19 @@ export function MarkdownImage({ alt, className, onError, onLoad, src: srcProp, .
     );
   }
 
-  if (!src) {
+  if (!src && !unavailable) {
     return null;
   }
 
   return (
     <span
+      {...sourceProps}
       className={cn("group relative my-4 block w-fit max-w-full sm:max-w-[32rem]", className)}
       data-streamdown="image-wrapper"
     >
       {failed ? (
         <span className="flex min-h-28 min-w-48 items-center justify-center rounded-xl border border-border bg-muted/25 px-4 py-6 text-sm text-muted-foreground sm:min-w-80">
-          {alt?.trim() || t("imageUnavailable")}
+          {alt?.trim() ? `${alt.trim()} · ${t("imageUnavailable")}` : t("imageUnavailable")}
         </span>
       ) : !displaySrc ? (
         <span className="block min-h-28 min-w-48 animate-pulse rounded-xl border border-border/60 bg-muted/20 sm:min-w-80" />
@@ -791,7 +801,7 @@ export function MarkdownImage({ alt, className, onError, onLoad, src: srcProp, .
           <MediaActionButton label={t("previewImage")} onClick={() => setPreviewOpen(true)}>
             <Maximize2 className="size-3.5" />
           </MediaActionButton>
-          {canEditImage ? (
+          {src && canEditImage ? (
             <MediaActionButton label={t("editImage")} onClick={() => imageActions?.onEditImage?.(src)}>
               <WandSparkles className="size-3.5" />
             </MediaActionButton>
