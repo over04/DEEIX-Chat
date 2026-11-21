@@ -1,13 +1,14 @@
 import { type RichClipboardContent, setRichClipboardData } from "../../lib/clipboard";
 import { ClipboardImageUnavailable, clipboardObjectImage, isPortableRasterImage } from "../../lib/clipboard-image";
 import { portableClipboardColor } from "./clipboard-color";
-import { copyMath, copySelectedMath, plainMath, RENDERED_MATH } from "./clipboard-math";
+import { clipboardFormulaMarkdown, CLIPBOARD_LATEX, copyClipboardFormula, plainMath, RENDERED_MATH } from "./clipboard-math";
 import { copyPlotImage, isPortablePlotImage } from "./clipboard-plot";
 
 const MESSAGE_BODY = "[data-chat-message-copy-body]";
 const MARKDOWN_ROOT = "[data-chat-markdown-scope]";
 const ROOTS = MESSAGE_BODY + ", " + MARKDOWN_ROOT;
 const EDITABLE = "input, textarea, select, [contenteditable]:not([contenteditable='false'])";
+const FORMULA_ATOM = RENDERED_MATH + ", [data-md-atomic='math'], button[data-clipboard-plot-equation]";
 const CODE_BLOCK = "[data-streamdown='code-block']";
 const CODE_BODY = "[data-streamdown='code-block-body']";
 const CODE_HEADER = "[data-streamdown='code-block-header']";
@@ -261,7 +262,7 @@ function copyBranch(source: Node, owner: Document, range?: Range, presentationTa
     return image;
   }
   if (source.matches("[data-clipboard-plot-equation]")) {
-    if (isHTMLTag(source, "button")) return range ? copySelectedMath(source, owner, range) : copyMath(source, owner);
+    if (isHTMLTag(source, "button")) return copyClipboardFormula(source, owner);
     if (isHTMLTag(source, "input")) return source.value.trim() ? owner.createTextNode(source.value) : undefined;
   }
   const visualLabel = source.matches(VISUAL_LABEL);
@@ -271,7 +272,7 @@ function copyBranch(source: Node, owner: Document, range?: Range, presentationTa
     throw new Error("The selected graph is not ready to copy");
   }
   if (source.hasAttribute("data-clipboard-image-unavailable")) throw new ClipboardImageUnavailable();
-  if (source.matches(RENDERED_MATH)) return range ? copySelectedMath(source, owner, range) : copyMath(source, owner);
+  if (source.matches(RENDERED_MATH)) return copyClipboardFormula(source, owner);
   if (!isHTMLElement(source)) return;
 
   const element = source;
@@ -364,6 +365,14 @@ function plainText(root: Node, listIndent = 0): string {
     if (tag === "br") { add("\n"); return; }
     if (tag === "hr") { separate(2); return; }
     if (tag === "img") { add(element.getAttribute("alt") ?? ""); return; }
+    const latex = clipboardFormulaMarkdown(element);
+    if (latex) {
+      const display = tag === "div";
+      if (display) separate(2);
+      add(latex);
+      if (display) separate(2);
+      return;
+    }
     if (tag === "math") {
       const display = element.getAttribute("display") === "block";
       if (display) separate(2);
@@ -403,6 +412,14 @@ function plainText(root: Node, listIndent = 0): string {
   return output;
 }
 
+function containsOnlyClipboardFormula(node: Element): boolean {
+  if (node.hasAttribute(CLIPBOARD_LATEX)) return true;
+  if (node.localName !== "div" && node.localName !== "span") return false;
+  const children = Array.from(node.childNodes).filter((child) => isElement(child) || child.textContent?.trim());
+  const [child] = children;
+  return children.length === 1 && isElement(child) && containsOnlyClipboardFormula(child);
+}
+
 function serializeRoots(roots: Element[], range?: Range, presentationTag?: ClipboardPresentationTag): RichClipboardContent | undefined {
   if (!roots.length) return;
   // Make an inert fragment rather than inserting message content into the page.
@@ -418,7 +435,11 @@ function serializeRoots(roots: Element[], range?: Range, presentationTag?: Clipb
     } else fragment.appendChild(node);
   }
   if (!fragment.hasChildNodes()) return;
-  return { html: fragment.innerHTML, text: plainText(fragment) };
+  const text = plainText(fragment);
+  // When copying just a formula, let note editors ingest Markdown directly
+  // rather than asking their HTML importer to interpret dollar delimiters.
+  if (containsOnlyClipboardFormula(fragment)) return { text };
+  return { html: fragment.innerHTML, text };
 }
 
 export function renderedRichClipboard(root: Element): RichClipboardContent | undefined {
@@ -446,7 +467,11 @@ export function renderedCodeClipboard(pre: HTMLPreElement, text: string): RichCl
 export function selectionRichClipboard(selection: Selection, owner: Document): RichClipboardContent | undefined {
   if (selection.isCollapsed || !selection.rangeCount) return;
   const range = selection.getRangeAt(0);
-  if ([range.startContainer, range.endContainer].some((node) => elementOf(node)?.closest(EDITABLE + ", button"))) return;
+  if ([range.startContainer, range.endContainer].some((node) => {
+    const element = elementOf(node);
+    const button = element?.closest("button");
+    return element?.closest(EDITABLE) || (button && !button.matches("[data-clipboard-plot-equation]"));
+  })) return;
   const start = copyRoot(range.startContainer);
   const end = copyRoot(range.endContainer);
   // Leave native selections outside chat content (including attachment labels) alone.
@@ -471,14 +496,46 @@ export function selectionRichClipboard(selection: Selection, owner: Document): R
   return serializeRoots(roots, range);
 }
 
+function formulaBoundary(container: Node, offset: number, end: boolean): readonly [Node, number] {
+  const element = elementOf(container);
+  const scope = element?.closest(MARKDOWN_ROOT);
+  if (!scope || element?.closest(EDITABLE + ", pre, code")) return [container, offset];
+  let atom = element?.closest(FORMULA_ATOM);
+  if (!atom || !scope.contains(atom)) return [container, offset];
+  // KaTeX nests its MathML and visual markup. Snap to the outermost wrapper.
+  for (let outer = atom.parentElement?.closest(FORMULA_ATOM); outer && scope.contains(outer); outer = atom.parentElement?.closest(FORMULA_ATOM)) {
+    atom = outer;
+  }
+  const parent = atom.parentNode;
+  if (!parent) return [container, offset];
+  const index = Array.from(parent.childNodes).indexOf(atom);
+  return [parent, end ? index + 1 : index];
+}
+
+function keepFormulaSelectionAtomic(selection: Selection | null) {
+  if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return;
+  const range = selection.getRangeAt(0);
+  const { startContainer, startOffset, endContainer, endOffset } = range;
+  const start = formulaBoundary(startContainer, startOffset, false);
+  const end = formulaBoundary(endContainer, endOffset, true);
+  if (start[0] === startContainer && start[1] === startOffset && end[0] === endContainer && end[1] === endOffset) return;
+  const backward = selection.anchorNode === endContainer && selection.anchorOffset === endOffset;
+  // Move the live selection, not just the text exported by the copy event.
+  selection.setBaseAndExtent(...(backward ? end : start), ...(backward ? start : end));
+}
+
 type CopyRegistration = { onError?: (error: unknown) => void };
-const listeners = new WeakMap<Document, { users: Set<CopyRegistration>; onCopy: (event: ClipboardEvent) => void }>();
+const listeners = new WeakMap<Document, {
+  users: Set<CopyRegistration>;
+  onCopy: (event: ClipboardEvent) => void;
+  onSelectionChange: () => void;
+}>();
 
 export function listenForRichSelectionCopy(owner: Document, onError?: CopyRegistration["onError"]) {
   let listener = listeners.get(owner);
   if (!listener) {
     const users = new Set<CopyRegistration>();
-    listener = { users, onCopy: (event) => {
+    listener = { users, onSelectionChange: () => keepFormulaSelectionAtomic(owner.getSelection()), onCopy: (event) => {
       if (event.defaultPrevented || !event.clipboardData || owner.activeElement?.closest(EDITABLE)) return;
       try {
         const selection = owner.getSelection();
@@ -498,6 +555,7 @@ export function listenForRichSelectionCopy(owner: Document, onError?: CopyRegist
     } };
     listeners.set(owner, listener);
     owner.addEventListener("copy", listener.onCopy);
+    owner.addEventListener("selectionchange", listener.onSelectionChange);
   }
   const current = listener;
   const registration = { onError };
@@ -506,6 +564,7 @@ export function listenForRichSelectionCopy(owner: Document, onError?: CopyRegist
     current.users.delete(registration);
     if (current.users.size) return;
     owner.removeEventListener("copy", current.onCopy);
+    owner.removeEventListener("selectionchange", current.onSelectionChange);
     listeners.delete(owner);
   };
 }

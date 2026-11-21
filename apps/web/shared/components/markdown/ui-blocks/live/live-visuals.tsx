@@ -60,7 +60,7 @@ function KatexLine({ latex, className }: { latex: string; className?: string }) 
   const label = t("copyFormula");
   return (
     <span
-      className={cn("cursor-copy [&_.katex]:text-[1em] focus-visible:outline-2 focus-visible:outline-ring", className)}
+      className={cn("cursor-copy select-all [&_.katex]:text-[1em] focus-visible:outline-2 focus-visible:outline-ring", className)}
       data-clipboard-formula="block"
       data-formula-copyable="true"
       role="button"

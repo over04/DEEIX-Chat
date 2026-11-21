@@ -2,7 +2,7 @@ import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
 
 import { escapeStructuralMarkdown } from "@/features/chat/utils/markdown-escape";
-import { copyMath, KATEX_OR_MATHML, MATHML_NAMESPACE } from "@/shared/components/markdown/clipboard-math";
+import { clipboardFormulaMarkdown, CLIPBOARD_LATEX, copyMath, KATEX_OR_MATHML, MATHML_NAMESPACE } from "@/shared/components/markdown/clipboard-math";
 import { CLIPBOARD_CODE_LABEL } from "@/shared/components/markdown/markdown-rich-copy";
 import { CODE_BLOCK_PLAIN_TEXT_MIME } from "@/shared/lib/clipboard";
 import { isRecord } from "@/shared/lib/type-guards";
@@ -81,6 +81,8 @@ function clipboardTextStyle(element: Element): string {
   const preview = element.ownerDocument.createElement("span");
   for (const name of ["color", "background-color", "font-weight", "font-style", "font-size", "font-family", "white-space"]) {
     const value = source.getPropertyValue(name);
+    // The semantic tag already becomes Markdown bold; keep only additional styling.
+    if (name === "font-weight" && /^(?:bold|700)$/.test(value) && /^(?:b|strong)$/.test(element.localName)) continue;
     if (!value || /(?:url\s*\(|var\s*\(|expression\s*\(|["'&;\\<>])/i.test(value)) continue;
     if (name === "white-space" && !/^(?:pre|pre-wrap|break-spaces)$/.test(value)) continue;
     preview.style.setProperty(name, value);
@@ -156,6 +158,18 @@ turndownService.addRule("styledClipboardText", {
   },
 });
 
+function clipboardLatex(element: Element): string | undefined {
+  return element.closest("pre, code, math") ? undefined : clipboardFormulaMarkdown(element);
+}
+
+turndownService.addRule("clipboardLatex", {
+  filter: (element) => !!clipboardLatex(element),
+  replacement: (_content, element) => {
+    const latex = clipboardLatex(element) ?? "";
+    return element.localName === "div" ? "\n\n" + latex + "\n\n" : latex;
+  },
+});
+
 function normalizeClipboardMath(body: HTMLElement): boolean {
   let found = false;
   for (const element of body.querySelectorAll(KATEX_OR_MATHML)) {
@@ -222,7 +236,7 @@ function resolveRichTextMarkdownPaste(clipboardData: DataTransfer): ClipboardMar
   // HTML line breaks, so turn those into text before the code rule runs.
   for (const lineBreak of body.querySelectorAll("pre > code br")) lineBreak.replaceWith("\n");
   normalizeStyledClipboardLinks(body);
-  const hasMath = normalizeClipboardMath(body);
+  const hasMath = normalizeClipboardMath(body) || Array.from(body.querySelectorAll(`[${CLIPBOARD_LATEX}]`)).some(clipboardLatex);
   if (!hasMath && !containsMarkdownFormatting(body)) return null;
 
   // The two representations have different layout (e.g. a fenced block or

@@ -3,6 +3,7 @@
 export const MATHML_NAMESPACE = "http://www.w3.org/1998/Math/MathML";
 export const KATEX_OR_MATHML = ".katex-display, .katex, math";
 export const RENDERED_MATH = `[data-clipboard-formula], ${KATEX_OR_MATHML}`;
+export const CLIPBOARD_LATEX = "data-deeix-clipboard-latex";
 const LATEX_ANNOTATION = 'annotation[encoding="application/x-tex"]';
 const MATH_ELEMENTS = [
   "math", "maction", "menclose", "merror", "mfenced", "mfrac", "mi", "mlabeledtr", "mmultiscripts", "mn", "mo", "mover",
@@ -58,37 +59,41 @@ export function copyMath(element: Element, owner: Document): Element | undefined
   const math = copyMathElement(original, owner);
   if (!math?.hasChildNodes()) return;
   math.setAttribute("xmlns", MATHML_NAMESPACE);
-  if (element.matches(".katex-display, [data-clipboard-formula='block']") || original.getAttribute("display") === "block") {
+  if (isDisplayFormula(element)) {
     math.setAttribute("display", "block");
   }
   return math;
 }
 
-export function copySelectedMath(element: Element, owner: Document, range: Range): Node | undefined {
-  const visual = element.querySelector(".katex-html") ?? (element.matches("math") ? element : element.querySelector("math"));
-  if (!visual) return;
-  const walker = visual.ownerDocument.createTreeWalker(visual, 4 /* SHOW_TEXT */);
-  let selected = "";
-  let hasVisibleGlyphs = false;
-  let complete = true;
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
-    const text = node.nodeValue ?? "";
-    if (!text || node.parentElement?.closest("annotation, annotation-xml, mphantom, .phantom")) continue;
-    hasVisibleGlyphs = true;
-    if (!range.intersectsNode(node)) {
-      complete = false;
-      continue;
-    }
-    const start = range.startContainer === node ? range.startOffset : 0;
-    const end = range.endContainer === node ? range.endOffset : text.length;
-    if (start || end !== text.length) complete = false;
-    selected += text.slice(start, end);
+function isDisplayFormula(element: Element): boolean {
+  return element.matches(".katex-display, [data-clipboard-formula='block'], math[display='block']") ||
+    element.querySelector("math")?.getAttribute("display") === "block";
+}
+
+function delimitedLatex(source: string, display: boolean): string {
+  return display ? `$$\n${source}\n$$` : `$${source}$`;
+}
+
+export function clipboardFormulaMarkdown(element: Element): string | undefined {
+  const source = element.getAttribute(CLIPBOARD_LATEX);
+  if (!source?.trim() || (element.localName !== "div" && element.localName !== "span")) return;
+  return delimitedLatex(source, element.localName === "div");
+}
+
+export function copyClipboardFormula(element: Element, owner: Document): Element | undefined {
+  const source = formulaSource(element);
+  if (!source) return copyMath(element, owner);
+  const display = isDisplayFormula(element);
+  const formula = owner.createElement(display ? "div" : "span");
+  // Keep the source intact when HTML importers fold whitespace. The visible
+  // fallback is also TeX, for consumers that strip custom attributes.
+  formula.setAttribute(CLIPBOARD_LATEX, source);
+  const lines = delimitedLatex(source, display).split("\n");
+  for (const [index, line] of lines.entries()) {
+    if (index) formula.append(owner.createElement("br"));
+    formula.append(line);
   }
-  if (complete && (hasVisibleGlyphs || range.commonAncestorContainer.contains(element))) return copyMath(element, owner);
-  // A visual fragment does not necessarily have a matching MathML subtree
-  // (for example just the base of a superscript). Copy only the chosen glyphs.
-  return selected ? owner.createTextNode(selected) : undefined;
+  return formula;
 }
 
 const SUPER = "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾";

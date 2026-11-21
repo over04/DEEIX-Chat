@@ -558,18 +558,18 @@ test("selection copy carries HTML and rendered text, while explicit source retai
   owner.dispatchEvent(event);
   assert.equal(event.defaultPrevented, true);
   assert.deepEqual(Object.keys(clipboard).sort(), ["text/html", "text/plain"]);
-  assert.equal(clipboard["text/plain"], "乙丙 和 链接 x²。\n\n末");
+  assert.equal(clipboard["text/plain"], "乙丙 和 链接 $x^2$。\n\n末");
   const pasted = new JSDOM(clipboard["text/html"]);
   context.after(() => pasted.window.close());
   assert.equal(pasted.window.document.querySelector("strong").textContent, "乙丙");
   assert.equal(pasted.window.document.querySelector("a").href, "https://example.com/");
-  assert.equal(pasted.window.document.querySelectorAll("math msup").length, 1);
+  assert.equal(pasted.window.document.querySelector("[data-deeix-clipboard-latex]").textContent, "$x^2$");
   assert.equal(pasted.window.document.querySelector(".katex-html, annotation, img"), null);
   assert.equal(selectedMarkdown(dom.window.getSelection(), owner), "**乙丙** 和 [链接](https://example.com) $x^2$。\n\n末");
   const math = owner.querySelector("[data-md-atomic='math']");
   assert.ok(math, owner.body.innerHTML);
-  const mathText = math.querySelector(".katex-html").querySelector(".mord").firstChild;
-  assert.equal(selectedMarkdown(select(mathText, 0, mathText, 1), owner), "$x^2$");
+  const mathIndex = [...math.parentNode.childNodes].indexOf(math);
+  assert.equal(selectedMarkdown(select(math.parentNode, mathIndex, math.parentNode, mathIndex + 1), owner), "$x^2$");
   assert.deepEqual(messageSelectionSource(owner.body), { markdown: "$x^2$", latex: "x^2" });
   const attachment = owner.createElement("p");
   attachment.textContent = "附件名";
@@ -686,18 +686,19 @@ test("whole-message copy preserves structure, table styles, code whitespace, and
   assert.equal(owner.querySelector("strong").textContent, "粗体");
   assert.equal(owner.querySelector("table").rows.length, 2);
   assert.equal(owner.querySelector("td").style.borderStyle, "solid");
-  assert.equal(owner.querySelectorAll("math").length, 2);
-  assert.equal(owner.querySelector("p math mfrac").children.length, 2);
-  assert.equal(owner.querySelectorAll('math[display="block"] mtable mtr').length, 2);
-  assert.equal(owner.querySelector("math").namespaceURI, "http://www.w3.org/1998/Math/MathML");
+  assert.equal(owner.querySelectorAll("[data-deeix-clipboard-latex]").length, 2);
+  assert.equal(owner.querySelector("p [data-deeix-clipboard-latex]").textContent, String.raw`$\frac{1}{x+1}$`);
+  const matrix = String.raw`\begin{pmatrix} a & b \\ c & d \end{pmatrix}`;
+  const block = owner.querySelector("div[data-deeix-clipboard-latex]");
+  assert.equal(block.getAttribute("data-deeix-clipboard-latex"), matrix);
+  assert.equal(block.querySelectorAll("br").length, 2);
   assert.equal(owner.querySelector("pre code").textContent, "  first\n\n  second");
-  assert.equal(owner.querySelector("annotation, .katex-html, button, img"), null);
-  assert.match(content.text, /正文 1\/\(x\+1\) 和 粗体。/);
+  assert.equal(owner.querySelector("math, annotation, .katex-html, button, img"), null);
+  assert.ok(content.text.includes(String.raw`正文 $\frac{1}{x+1}$ 和 粗体。`));
   assert.match(content.text, /列一\t列二\n甲\t乙/);
-  assert.match(content.text, /a, b; c, d/);
+  assert.ok(content.text.includes(["$$", matrix, "$$"].join("\n")));
   const equation = renderedRichClipboard(root.querySelector(".katex-display"));
-  assert.match(equation.html, /^<math /);
-  assert.equal(equation.text.includes("a, b; c, d"), true);
+  assert.deepEqual(equation, { text: ["$$", matrix, "$$"].join("\n") });
 });
 
 test("crossing list items keeps only the item openings in the range and their original numbers", (context) => {
@@ -718,7 +719,7 @@ test("crossing list items keeps only the item openings in the range and their or
   assert.equal(whole.text, "4. 未选\n5. 选中链接\n9. 下一项\n\n列表外");
 });
 
-test("selected inline spaces, quote and cell fragments, and mathematical glyphs stay in range", (context) => {
+test("selected inline spaces and quote and cell fragments stay in range", (context) => {
   const dom = render(["行内代码： `a   b`", "", "> **引用内容**", "", "| 标题 | 另一个 |", "| --- | --- |", "| abc | def |", "", "$x^2$"].join("\n"));
   const { owner, select, t } = setupSelection(dom);
   t(context);
@@ -744,15 +745,74 @@ test("selected inline spaces, quote and cell fragments, and mathematical glyphs 
   const cells = selectionRichClipboard(select(cell, 1, otherCell, 2), owner);
   assert.equal(cells.text, "bc\tde");
   assert.match(cells.html, /<table/);
-  const math = owner.querySelector(".katex-html");
-  const glyph = firstText(math);
-  const partial = selectionRichClipboard(select(glyph, 0, glyph, 1), owner);
-  assert.equal(partial.text, "x");
-  assert.doesNotMatch(partial.html, /msup|annotation/);
-  const last = lastText(math);
-  const full = selectionRichClipboard(select(glyph, 0, last, last.length), owner);
-  assert.equal(full.text, "x²");
-  assert.match(full.html, /<msup>/);
+});
+
+test("the live selection snaps to formula boundaries and keeps the drag direction", (context) => {
+  const dom = render("正文之前\n\n$$\nx^2+1\n$$\n\n正文之后");
+  const { owner, t } = setupSelection(dom);
+  t(context);
+  context.after(listenForRichSelectionCopy(owner));
+  const display = owner.querySelector(".katex-display");
+  const formula = display.closest("[data-md-atomic='math']") ?? display;
+  const start = firstText(owner.querySelector("p"));
+  const visual = firstText(formula.querySelector(".katex-html"));
+  const selection = owner.getSelection();
+  const parent = formula.parentNode;
+  const index = [...parent.childNodes].indexOf(formula);
+  // Chrome can report a KaTeX descendant as a drag endpoint even with user-select: all.
+  selection.setBaseAndExtent(visual, 0, start, 1);
+  owner.dispatchEvent(new dom.window.Event("selectionchange"));
+  assert.equal(selection.anchorNode, parent);
+  assert.equal(selection.anchorOffset, index + 1);
+  assert.equal(selection.focusNode, start);
+  assert.equal(selection.focusOffset, 1);
+  selection.setBaseAndExtent(start, 1, visual, 1);
+  owner.dispatchEvent(new dom.window.Event("selectionchange"));
+  assert.equal(selection.anchorNode, start);
+  assert.equal(selection.anchorOffset, 1);
+  assert.equal(selection.focusNode, parent);
+  assert.equal(selection.focusOffset, index + 1);
+});
+
+test("selecting a formula block copies complete LaTeX as plain text", (context) => {
+  const source = String.raw`\bar{X}_n=\frac{1}{n}\sum_{i=1}^n X_i`;
+  const dom = render(["正文开始", "", "$$", source, "$$", "", "正文结束"].join("\n"));
+  const { owner, select, t } = setupSelection(dom);
+  t(context);
+  const formula = owner.querySelector(".katex-display");
+  const parent = formula.parentNode;
+  const index = [...parent.childNodes].indexOf(formula);
+  const expected = ["$$", source, "$$"].join("\n");
+
+  select(parent, index, parent, index + 1);
+  const formats = new Map([["text/html", "old data"]]);
+  context.after(listenForRichSelectionCopy(owner));
+  const event = new dom.window.Event("copy", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", { value: {
+    clearData: () => formats.clear(),
+    setData: (type, value) => formats.set(type, value),
+  } });
+  owner.dispatchEvent(event);
+  assert.equal(event.defaultPrevented, true);
+  assert.deepEqual([...formats], [["text/plain", expected]]);
+
+  const paragraphs = owner.querySelectorAll("[data-chat-markdown-scope] p");
+  const start = firstText(paragraphs[0]);
+  const next = firstText(paragraphs[1]);
+  assert.deepEqual(selectionRichClipboard(select(start, 2, start, start.length), owner), { html: "<span>开始</span>", text: "开始" });
+  const content = selectionRichClipboard(select(start, 2, parent, index + 1), owner);
+  assert.equal(content.text, "开始\n\n" + expected);
+  assert.doesNotMatch(content.html, /<math\b|katex/);
+  const imported = new JSDOM(content.html);
+  context.after(() => imported.window.close());
+  const html = imported.window.document.querySelector("[data-deeix-clipboard-latex]");
+  assert.equal(html.getAttribute("data-deeix-clipboard-latex"), source);
+  assert.deepEqual([...html.childNodes].filter((node) => node.nodeType === 3).map((node) => node.textContent), ["$$", source, "$$"]);
+  installBrowserGlobals(context, { DOMParser: dom.window.DOMParser });
+  assert.deepEqual(resolveClipboardMarkdownPaste({ getData: (type) => ({ "text/html": content.html, "text/plain": content.text })[type] ?? "" }), {
+    block: true, markdown: "开始\n\n" + expected,
+  });
+  assert.equal(selectionRichClipboard(select(start, 2, next, next.length), owner).text, "开始\n\n" + expected + "\n\n正文结束");
 });
 
 test("selecting linked code keeps its link and formatted paste keeps hard breaks", (context) => {
@@ -1038,14 +1098,30 @@ test("clipboard serializes task-list state without copying a form control", (con
   assert.doesNotMatch(content.html, /<input/);
 });
 
+test("copying the reported bold sentence pastes clean Markdown in the composer", (context) => {
+  const source = "要理解为什么不需要独立，只需看一眼该定理的证明核心。切比雪夫大数定律的证明完全建立在**切比雪夫不等式**和**方差的性质**之上：";
+  const dom = render(source);
+  const { owner, select, t } = setupSelection(dom);
+  t(context);
+  installBrowserGlobals(context, { DOMParser: dom.window.DOMParser });
+  const p = owner.querySelector("[data-chat-markdown-scope] p");
+  // JSDOM does not compute the --font-chat-strong-weight CSS variable.
+  for (const bold of p.querySelectorAll("strong")) bold.style.fontWeight = "700";
+  const first = firstText(p);
+  const last = lastText(p);
+  const clip = selectionRichClipboard(select(first, 0, last, last.length), owner);
+  assert.match(clip.html, /<strong style="[^"]*font-weight: 700;/);
+  assert.equal(resolveClipboardMarkdownPaste({ getData: (type) => ({ "text/html": clip.html, "text/plain": clip.text })[type] ?? "" }).markdown, source);
+});
+
 test("copy and paste keep math structure and Markdown formatting in the composer", (context) => {
   const original = render("See **equation** $x^{a+b}+\\frac{2}{3}$ then $\\text{*bold* [note] | path}$.");
   context.after(() => original.window.close());
   installBrowserGlobals(context, { DOMParser: original.window.DOMParser });
   const clip = renderedRichClipboard(original.window.document.querySelector("[data-chat-markdown-scope]"));
-  assert.match(clip.text, /equation x\^\(a\+b\)\+2\/3/);
+  assert.ok(clip.text.includes(String.raw`equation $x^{a+b}+\frac{2}{3}$`));
   const result = resolveClipboardMarkdownPaste({ getData: (type) => ({ "text/html": clip.html, "text/plain": clip.text })[type] ?? "" });
-  assert.match(result.markdown, /\*\*equation\*\* <math/);
+  assert.ok(result.markdown.includes(String.raw`**equation** $x^{a+b}+\frac{2}{3}$`));
   const pasted = render(result.markdown, { variant: "user" });
   context.after(() => pasted.window.close());
   const owner = pasted.window.document;
@@ -1053,7 +1129,7 @@ test("copy and paste keep math structure and Markdown formatting in the composer
   assert.equal(owner.querySelector("math msup > mrow").textContent, "a+b");
   assert.equal(owner.querySelector("math mfrac > mn:last-child").textContent, "3");
   const originallyRenderedMathText = original.window.document.querySelectorAll("math")[1].querySelector("semantics").firstElementChild.textContent;
-  assert.equal(owner.querySelectorAll("math")[1].textContent, originallyRenderedMathText);
+  assert.equal(owner.querySelectorAll("math")[1].querySelector("semantics").firstElementChild.textContent, originallyRenderedMathText);
   assert.match(originallyRenderedMathText, /\*bold\*\s+\[note\]/);
   assert.equal(owner.querySelector("math mtext strong, math span, math img"), null);
 
@@ -1065,9 +1141,9 @@ test("copy and paste keep math structure and Markdown formatting in the composer
 });
 
 test("pure text distinguishes structural fraction operands and exponent bases", (context) => {
-  const dom = render("$\\frac{a}{bc}+\\frac{a}{b}c$\n\n$" + "{ab}^2+ab^2$");
+  const dom = new JSDOM('<article><p><math><mfrac><mi>a</mi><mrow><mi>b</mi><mi>c</mi></mrow></mfrac><mo>+</mo><mfrac><mi>a</mi><mi>b</mi></mfrac><mi>c</mi></math></p><p><math><msup><mrow><mi>a</mi><mi>b</mi></mrow><mn>2</mn></msup><mo>+</mo><mi>a</mi><msup><mi>b</mi><mn>2</mn></msup></math></p></article>');
   context.after(() => dom.window.close());
-  const clip = renderedRichClipboard(dom.window.document.querySelector("[data-chat-markdown-scope]"));
+  const clip = renderedRichClipboard(dom.window.document.querySelector("article"));
   assert.equal(clip.text, "a/(bc)+(a/b)c\n\n(ab)²+ab²");
 });
 
@@ -1116,8 +1192,9 @@ test("public messages and independent previews expose a Markdown source menu", (
   const bold = root.querySelector("strong [data-md-text]").firstChild;
   select(bold, 0, bold, 9);
   assert.equal(messageSelectionSource(root).markdown, "**Read-only**");
-  const equation = root.querySelector(".katex-html .mord").firstChild;
-  select(equation, 0, equation, equation.textContent.length);
+  const equation = root.querySelector(".katex");
+  const equationIndex = [...equation.parentNode.childNodes].indexOf(equation);
+  select(equation.parentNode, equationIndex, equation.parentNode, equationIndex + 1);
   assert.equal(messageSelectionSource(root).latex, "x^2");
   const messages = [UserMessageMeta, AssistantMessageMeta].map((Component) => React.createElement(Component, {
     key: Component.name,
@@ -1160,7 +1237,7 @@ test("real plot markup copies equations and curves; live formulas remain keyboar
   const pasted = new JSDOM(content.html);
   context.after(() => pasted.window.close());
   const pastedDocument = pasted.window.document;
-  assert.equal(pastedDocument.querySelectorAll("li math").length, 2);
+  assert.equal(pastedDocument.querySelectorAll("li [data-deeix-clipboard-latex]").length, 2);
   assert.equal(pastedDocument.querySelector("button, input"), null);
   const image = pastedDocument.querySelector("img[alt='Two curves']");
   assert.match(image.src, /^data:image\/svg\+xml/);
@@ -1178,8 +1255,10 @@ test("real plot markup copies equations and curves; live formulas remain keyboar
   assert.notEqual(worked.querySelector("math").textContent, before);
   await React.act(async () => worked.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
   assert.equal(writes.length, 1);
-  assert.match(await writes[0][0].formats["text/html"].text(), /<math [^>]*display="block"/);
-  assert.match(await writes[0][0].formats["text/plain"].text(), /14/);
+  assert.deepEqual(Object.keys(writes[0][0].formats), ["text/plain"]);
+  const latestSource = worked.querySelector('annotation[encoding="application/x-tex"]').textContent;
+  assert.match(latestSource, /14/);
+  assert.equal(await writes[0][0].formats["text/plain"].text(), ["$$", latestSource, "$$"].join("\n"));
 });
 
 test("attachment placeholders do not request the Base64 payload", () => {

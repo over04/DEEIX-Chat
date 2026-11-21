@@ -54,7 +54,7 @@ export function useCopyAction({ messages, resetDelayMs = 1500 }: CopyActionOptio
 
   const copy = React.useCallback(
     async (value: string | RichClipboardContent | undefined, overrides: CopyActionInput = {}): Promise<boolean> => {
-      if (value == null || (typeof value === "string" ? !value.trim() : !value.html)) {
+      if (value == null || (typeof value === "string" ? !value.trim() : !value.html && !value.text.trim())) {
         setCopied(false);
         setCopiedKey(null);
         const emptyMessage = overrides.empty ?? messages.empty;

@@ -1,9 +1,9 @@
 export const CODE_BLOCK_PLAIN_TEXT_MIME = "application/x-deeix-code-block-text";
 
-export type RichClipboardContent = { html: string; text: string };
+export type RichClipboardContent = { html?: string; text: string };
 
-function clipboardFormats(content: RichClipboardContent) {
-  return { "text/html": content.html, "text/plain": content.text };
+function clipboardFormats(content: RichClipboardContent): Record<string, string> {
+  return content.html === undefined ? { "text/plain": content.text } : { "text/html": content.html, "text/plain": content.text };
 }
 
 export function setRichClipboardData(data: DataTransfer, content: RichClipboardContent) {

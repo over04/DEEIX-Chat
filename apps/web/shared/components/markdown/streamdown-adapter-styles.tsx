@@ -11,6 +11,12 @@ import * as React from "react";
 export const StreamdownAdapterStyles = React.memo(function StreamdownAdapterStyles() {
   return (
     <style jsx global>{`
+      /* Treat the outer formula as part of the reading flow, never its individual glyphs. */
+      [data-chat-markdown-scope]
+        :is([data-md-atomic="math"], [data-clipboard-formula], [data-clipboard-plot-equation]:not(input), .katex-display, .katex, math) {
+        user-select: all;
+      }
+
       :is(
           [data-streamdown="mermaid-block-actions"],
           [data-streamdown="table-download-actions"]
