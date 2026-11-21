@@ -147,8 +147,6 @@ type ChatMessageBotProps = {
   onDeleteMessage?: (message: ChatAreaMessage) => Promise<void> | void;
   onCycleMessageBranch: (parentPublicID: string | null, direction: "previous" | "next") => void;
   onReactAssistantMessage: (publicID: string, reaction: AssistantReaction) => void;
-  onCopy: () => void;
-  copySucceeded?: boolean;
   markdownRender?: boolean;
   autoExpandThinking?: boolean;
   autoExpandToolCalls?: boolean;
@@ -185,8 +183,6 @@ export function ChatMessageBot({
   onDeleteMessage,
   onCycleMessageBranch,
   onReactAssistantMessage,
-  onCopy,
-  copySucceeded = false,
   markdownRender = true,
   autoExpandThinking = true,
   autoExpandToolCalls = true,
@@ -213,6 +209,7 @@ export function ChatMessageBot({
   const submitT = useTranslations("chat.submit");
   const [isEditing, setIsEditing] = React.useState(false);
   const [editingValue, setEditingValue] = React.useState(item.content);
+  const contentRef = React.useRef<HTMLDivElement>(null);
   // Some IMEs end the composition before the Enter keydown arrives, so the state is tracked too.
   const editingComposingRef = React.useRef(false);
   const onRetry = React.useCallback(() => {
@@ -427,6 +424,8 @@ export function ChatMessageBot({
       />
 
       <div
+        ref={contentRef}
+        data-chat-message-copy-body=""
         data-chat-assistant-content=""
         className="w-full min-w-0 max-w-none overflow-hidden text-[15px] leading-8 text-foreground [overflow-wrap:anywhere]"
         style={{ fontFamily: "var(--font-chat)", fontWeight: "var(--font-chat-weight)" }}
@@ -445,6 +444,7 @@ export function ChatMessageBot({
             {hasInlineContent && markdownRender ? (
               <StreamdownRender
                 content={streamdownContent}
+                showCopySourceMenu={false}
                 streaming={Boolean(item.isStreaming)}
                 autoExpandThinking={autoExpandThinking}
                 imageActions={markdownImageActions}
@@ -458,6 +458,7 @@ export function ChatMessageBot({
         ) : hasStreamdownContent && markdownRender ? (
           <StreamdownRender
             content={renderableContent}
+            showCopySourceMenu={false}
             streaming={Boolean(item.isStreaming)}
             autoExpandThinking={autoExpandThinking}
             imageActions={markdownImageActions}
@@ -512,10 +513,9 @@ export function ChatMessageBot({
         onRetry={onRetry}
         onContinue={onContinueAssistantMessage ? onContinue : undefined}
         onEdit={() => setIsEditing(true)}
-        onCopy={onCopy}
+        copyBodyRef={contentRef}
         onFork={onForkMessage ? onFork : undefined}
         onDelete={onDeleteMessage ? onDelete : undefined}
-        copySucceeded={copySucceeded}
         onReact={(value) => onReactAssistantMessage(item.publicID, value)}
         showModelInfo={showModelInfo}
         showLatency={showLatency}

@@ -42,8 +42,6 @@ type ChatMessageUserProps = {
   onModelChange?: (platformModelName: string) => void;
   onModelCatalogRefresh?: () => void | Promise<void>;
   onCycleMessageBranch: (parentPublicID: string | null, direction: "previous" | "next") => void;
-  onCopy: () => void;
-  copySucceeded?: boolean;
   readOnly?: boolean;
   attachmentContentLoader?: FileContentLoader;
   showBranchNavigator?: boolean;
@@ -62,8 +60,6 @@ export function ChatMessageUser({
   onModelChange = () => undefined,
   onModelCatalogRefresh,
   onCycleMessageBranch,
-  onCopy,
-  copySucceeded = false,
   readOnly = false,
   attachmentContentLoader,
   showBranchNavigator = true,
@@ -314,13 +310,14 @@ export function ChatMessageUser({
             <div className="relative">
               <div
                 ref={contentRef}
+                data-chat-message-copy-body=""
                 className={cn(
                   "chat-user-message-collapsible overflow-hidden",
                   measured && canCollapse && "transition-[height] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
                 )}
                 style={contentMaxHeight == null ? undefined : measured && canCollapse ? { height: contentMaxHeight } : { maxHeight: contentMaxHeight }}
               >
-                <StreamdownRender content={item.content} variant="user" />
+                <StreamdownRender content={item.content} variant="user" showCopySourceMenu={false} />
               </div>
               {measured && canCollapse ? (
                 <div
@@ -363,9 +360,8 @@ export function ChatMessageUser({
         onCycleBranch={onCycleMessageBranch}
         onRetry={onRetry}
         onEdit={() => setIsEditing(true)}
-        onCopy={onCopy}
+        copyBodyRef={contentRef}
         onDelete={onDeleteUserMessage ? onDelete : undefined}
-        copySucceeded={copySucceeded}
         readOnly={readOnly}
         alwaysVisible={readOnly}
         showBranchNavigator={showBranchNavigator}

@@ -6,7 +6,6 @@ import { useTranslations } from "next-intl";
 import * as React from "react";
 import {
   type AllowedTags,
-  type Components,
   defaultRehypePlugins,
   defaultRemarkPlugins,
   type IconMap,
@@ -93,6 +92,8 @@ import { scanUIBlockFences, UI_WIDGET_FENCE_LANGUAGE, widgetKey } from "@deeix/c
 import { UIWidgetCompletionProvider } from "./ui-blocks";
 import { UIBlockOpenProvider } from "./ui-blocks/ui-block-actions";
 import { type UIBlockStateBinding, UIBlockStateProvider, useMessageUIBlockStateBinding } from "./ui-blocks/ui-block-state";
+import { MATHML_MARKDOWN_TAGS } from "./clipboard-math";
+import { MarkdownSourceCopyMenu } from "./markdown-source-copy-menu";
 import { useMarkdownCopy } from "./use-markdown-copy";
 import { MarkdownCopyBoundary, SourceTrackedStreamdownBlock } from "./markdown-copy-boundary";
 import { rehypeMarkdownCopySource, sourceOffsetMap } from "./markdown-source";
@@ -103,6 +104,7 @@ type StreamdownRenderProps = {
   streaming?: boolean;
   variant?: "default" | "thinking" | "user";
   sourcePositions?: boolean;
+  showCopySourceMenu?: boolean;
   autoExpandThinking?: boolean;
   imageActions?: MarkdownImageActions;
   artifactActions?: MarkdownArtifactActions;
@@ -221,6 +223,7 @@ const STREAMDOWN_CARET = "circle" as const;
 const STREAMDOWN_CODE_BLOCK_MAX_HEIGHT = "22rem";
 const STREAMDOWN_LINK_SAFETY = { enabled: false } as const;
 const STREAMDOWN_SANITIZED_HTML_TAGS = {
+  ...MATHML_MARKDOWN_TAGS,
   article: ["style"],
   aside: ["style"],
   details: ["open", "style"],
@@ -355,8 +358,8 @@ const BASE_MARKDOWN_CLASSNAME = cn(
   "[&_.katex-display]:my-3.5 [&_.katex-display]:block [&_.katex-display]:max-w-full [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:px-1 [&_.katex-display]:py-1.5 [&_.katex-display]:text-center",
   "[&_.katex-display>.katex]:inline-block [&_.katex-display>.katex]:min-w-fit [&_.katex-display>.katex]:max-w-none [&_.katex-display>.katex]:text-center",
   "[&_.katex_.mfrac_.frac-line]:!inline-block [&_.katex_.mfrac_.frac-line]:!w-full [&_.katex_.mfrac_.frac-line]:min-h-px [&_.katex_.mfrac_.frac-line]:![border-bottom:0.04em_solid_currentColor]",
-  "[&_[data-latex-copyable='true']]:cursor-copy [&_[data-latex-copyable='true']]:rounded-sm [&_[data-latex-copyable='true']]:outline-none [&_[data-latex-copyable='true']]:transition-colors",
-  "[&_[data-latex-copyable='true']:hover]:bg-foreground/[0.035] [&_[data-latex-copyable='true']:focus-visible]:bg-foreground/[0.045] [&_[data-latex-copyable='true']:focus-visible]:ring-2 [&_[data-latex-copyable='true']:focus-visible]:ring-ring/25",
+  "[&_[data-formula-copyable='true']]:cursor-copy [&_[data-formula-copyable='true']]:rounded-sm [&_[data-formula-copyable='true']]:outline-none [&_[data-formula-copyable='true']]:transition-colors",
+  "[&_[data-formula-copyable='true']:hover]:bg-foreground/[0.035] [&_[data-formula-copyable='true']:focus-visible]:bg-foreground/[0.045] [&_[data-formula-copyable='true']:focus-visible]:ring-2 [&_[data-formula-copyable='true']:focus-visible]:ring-ring/25",
   "[&_[data-inline-code-copyable='true']]:cursor-copy [&_[data-inline-code-copyable='true']]:outline-none [&_[data-inline-code-copyable='true']]:transition-colors",
   "[&_[data-inline-code-copyable='true']:hover]:bg-foreground/[0.08] [&_[data-inline-code-copyable='true']:focus-visible]:bg-foreground/[0.08] [&_[data-inline-code-copyable='true']:focus-visible]:ring-2 [&_[data-inline-code-copyable='true']:focus-visible]:ring-ring/25",
   "[&_strong]:font-semibold",
@@ -713,6 +716,7 @@ export const StreamdownRender = React.memo(function StreamdownRender({
   streaming = false,
   variant = "default",
   sourcePositions = false,
+  showCopySourceMenu = !sourcePositions,
   autoExpandThinking = true,
   imageActions,
   artifactActions,
@@ -879,6 +883,11 @@ export const StreamdownRender = React.memo(function StreamdownRender({
           ))}
         </MarkdownTableStreamingContext.Provider>
       </MarkdownMermaidPendingContext.Provider>
+      {showCopySourceMenu && !streaming ? (
+        <div className="mt-1 flex justify-end" data-screenshot-exclude="true">
+          <MarkdownSourceCopyMenu source={copyDocument.source} bodyRef={markdownCopyRootRef} labeled />
+        </div>
+      ) : null}
     </div>
   );
 });

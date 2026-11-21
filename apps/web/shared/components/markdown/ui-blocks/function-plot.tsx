@@ -39,14 +39,14 @@ const DEFAULT_X: readonly [number, number] = [-5, 5];
 // Line colours need more contrast than the chart fill palette; each pair reads
 // on both themes.
 const SERIES_COLORS = [
-  { stroke: "stroke-[var(--chart-1)]", dot: "bg-[var(--chart-1)]" },
-  { stroke: "stroke-[var(--chart-2)]", dot: "bg-[var(--chart-2)]" },
-  { stroke: "stroke-emerald-600 dark:stroke-emerald-400", dot: "bg-emerald-600 dark:bg-emerald-400" },
-  { stroke: "stroke-sky-600 dark:stroke-sky-400", dot: "bg-sky-600 dark:bg-sky-400" },
-  { stroke: "stroke-amber-600 dark:stroke-amber-400", dot: "bg-amber-600 dark:bg-amber-400" },
-  { stroke: "stroke-pink-600 dark:stroke-pink-400", dot: "bg-pink-600 dark:bg-pink-400" },
-  { stroke: "stroke-violet-600 dark:stroke-violet-400", dot: "bg-violet-600 dark:bg-violet-400" },
-  { stroke: "stroke-teal-600 dark:stroke-teal-400", dot: "bg-teal-600 dark:bg-teal-400" },
+  { stroke: "stroke-[var(--chart-1)]", dot: "bg-[var(--chart-1)]", portable: "#3b82f6" },
+  { stroke: "stroke-[var(--chart-2)]", dot: "bg-[var(--chart-2)]", portable: "#c2410c" },
+  { stroke: "stroke-emerald-600 dark:stroke-emerald-400", dot: "bg-emerald-600 dark:bg-emerald-400", portable: "#059669" },
+  { stroke: "stroke-sky-600 dark:stroke-sky-400", dot: "bg-sky-600 dark:bg-sky-400", portable: "#0284c7" },
+  { stroke: "stroke-amber-600 dark:stroke-amber-400", dot: "bg-amber-600 dark:bg-amber-400", portable: "#b45309" },
+  { stroke: "stroke-pink-600 dark:stroke-pink-400", dot: "bg-pink-600 dark:bg-pink-400", portable: "#db2777" },
+  { stroke: "stroke-violet-600 dark:stroke-violet-400", dot: "bg-violet-600 dark:bg-violet-400", portable: "#7c3aed" },
+  { stroke: "stroke-teal-600 dark:stroke-teal-400", dot: "bg-teal-600 dark:bg-teal-400", portable: "#0d9488" },
 ] as const;
 const EDGE_LABEL_GAP = 10;
 const ZOOM_STEP = 1.5;
@@ -107,7 +107,7 @@ function rowToLatex(text: string): string | null {
 }
 
 function MathDisplay({ latex, className }: { latex: string; className?: string }) {
-  const html = React.useMemo(() => katex.renderToString(latex, { throwOnError: false, output: "html" }), [latex]);
+  const html = React.useMemo(() => katex.renderToString(latex, { throwOnError: false, output: "htmlAndMathml" }), [latex]);
   // KaTeX output is generated from our own AST, never from raw model text.
   // biome-ignore lint/security/noDangerouslySetInnerHtml: KaTeX markup built from a parsed AST
   return <span className={className} dangerouslySetInnerHTML={{ __html: html }} />;
@@ -535,6 +535,7 @@ function FunctionPlot({ id, props }: UIBlockRenderProps<FunctionPlotProps>) {
                     {latex ? (
                       <button
                         type="button"
+                        data-clipboard-plot-equation=""
                         onClick={() => {
                           setEditingKey(row.key);
                           setPendingFocus(row.key);
@@ -553,6 +554,7 @@ function FunctionPlot({ id, props }: UIBlockRenderProps<FunctionPlotProps>) {
                         }
                       }}
                       value={row.expr}
+                      data-clipboard-plot-equation={!latex ? "" : undefined}
                       onChange={(event) => updateRow(row.key, { expr: event.target.value })}
                       onFocus={() => setEditingKey(row.key)}
                       onBlur={() => setEditingKey((key) => (key === row.key ? null : key))}
@@ -632,8 +634,8 @@ function FunctionPlot({ id, props }: UIBlockRenderProps<FunctionPlotProps>) {
           aria-label={props.title ?? rows.map((row) => row.expr).join(", ")}
         >
           {width > 0 ? (
-            <svg aria-hidden="true" width={width} height={height} className="block">
-              <g className="stroke-border" strokeWidth={0.5}>
+            <svg aria-hidden="true" data-clipboard-plot="" width={width} height={height} className="block">
+              <g className="stroke-border" stroke="#cbd5e1" strokeWidth={0.5}>
                 {xTicks.map((x) => (
                   <line key={`gx-${x}`} x1={toPx(x)} x2={toPx(x)} y1={0} y2={height} />
                 ))}
@@ -641,11 +643,11 @@ function FunctionPlot({ id, props }: UIBlockRenderProps<FunctionPlotProps>) {
                   <line key={`gy-${y}`} x1={0} x2={width} y1={toPy(y)} y2={toPy(y)} />
                 ))}
               </g>
-              <g className="stroke-foreground/45" strokeWidth={1}>
+              <g className="stroke-foreground/45" stroke="#64748b" strokeWidth={1}>
                 <line x1={0} x2={width} y1={axisX} y2={axisX} />
                 <line x1={axisY} x2={axisY} y1={0} y2={height} />
               </g>
-              <g className="fill-muted-foreground" fontSize={10}>
+              <g className="fill-muted-foreground" fill="#475569" fontSize={10}>
                 {xTicks
                   .filter((x) => x !== 0 && toPx(x) > EDGE_LABEL_GAP && toPx(x) < width - EDGE_LABEL_GAP)
                   .map((x) => (
@@ -664,7 +666,9 @@ function FunctionPlot({ id, props }: UIBlockRenderProps<FunctionPlotProps>) {
               <g fill="none" strokeWidth={1.75} strokeLinejoin="round" strokeLinecap="round">
                 {compiledRows.map((row) =>
                   row.curve && !row.hidden ? (
-                    <path key={`${id}-path-${row.key}`} d={buildPath(row.curve, current, width, height)} className={SERIES_COLORS[row.key % SERIES_COLORS.length].stroke} />
+                    <path key={`${id}-path-${row.key}`} d={buildPath(row.curve, current, width, height)}
+                       stroke={SERIES_COLORS[row.key % SERIES_COLORS.length].portable}
+                       className={SERIES_COLORS[row.key % SERIES_COLORS.length].stroke} />
                   ) : null,
                 )}
               </g>

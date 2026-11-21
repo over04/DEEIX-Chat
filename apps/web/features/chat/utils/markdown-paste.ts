@@ -2,6 +2,7 @@ import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
 
 import { escapeStructuralMarkdown } from "@/features/chat/utils/markdown-escape";
+import { copyMath, KATEX_OR_MATHML, MATHML_NAMESPACE } from "@/shared/components/markdown/clipboard-math";
 import { CODE_BLOCK_PLAIN_TEXT_MIME } from "@/shared/lib/clipboard";
 import { isRecord } from "@/shared/lib/type-guards";
 
@@ -58,6 +59,28 @@ const turndownService = new TurndownService({
 turndownService.use(gfm);
 turndownService.remove(["script", "style", "noscript"]);
 turndownService.escape = escapeStructuralMarkdown;
+turndownService.addRule("presentationMathML", {
+  filter: (element) => element.localName === "math" && element.namespaceURI === MATHML_NAMESPACE && !element.closest("pre, code"),
+  replacement: (_content, element) => {
+    if (element.nodeType !== 1 || !("outerHTML" in element) || typeof element.outerHTML !== "string") return "";
+    // Keep native equation structure; entities prevent Markdown parsers from
+    // treating equation text as emphasis, math delimiters, or table separators.
+    const markup = element.outerHTML.replace(/[\\`*_~$[\]|\r\n]/g, (char) => `&#${char.charCodeAt(0)};`);
+    return element.getAttribute("display") === "block" && !element.closest("td, th") ? "\n\n" + markup + "\n\n" : markup;
+  },
+});
+
+function normalizeClipboardMath(body: HTMLElement): boolean {
+  let found = false;
+  for (const element of body.querySelectorAll(KATEX_OR_MATHML)) {
+    if (!body.contains(element) || element.closest("pre, code, annotation, annotation-xml")) continue;
+    const math = copyMath(element, body.ownerDocument);
+    if (!math) continue;
+    element.replaceWith(math);
+    found = true;
+  }
+  return found;
+}
 
 function formatFencedCode(code: string, language: string): string {
   const normalizedCode = code.replace(/\r\n?/g, "\n");
@@ -124,18 +147,18 @@ function losesSourceLineBreaks(markdown: string, plainText: string): boolean {
 function resolveRichTextMarkdownPaste(clipboardData: DataTransfer): ClipboardMarkdownPaste | null {
   const html = clipboardData.getData("text/html");
   const plainText = clipboardData.getData("text/plain");
-  if (!html.trim() || !plainText.trim()) {
-    return null;
-  }
+  if (!html.trim()) return null;
 
   const body = new DOMParser().parseFromString(html, "text/html").body;
-  if (!containsMarkdownFormatting(body)) {
-    return null;
-  }
+  const hasMath = normalizeClipboardMath(body);
+  if (!hasMath && (!plainText.trim() || !containsMarkdownFormatting(body))) return null;
 
   const markdown = turndownService.turndown(body).trim();
-  if (!markdown) {
-    return null;
+  if (!markdown) return null;
+  if (hasMath) {
+    // The text representation is for text consumers. Keep the actual math tree
+    // even when it is the only rich element on the clipboard.
+    return { block: containsBlockHTML(body) || !!body.querySelector('math[display="block"]'), markdown };
   }
 
   const normalizedMarkdown = normalizeText(markdown);

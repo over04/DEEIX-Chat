@@ -1,7 +1,8 @@
 import * as React from "react";
 
+import { forgetClipboardObjectImage, prepareClipboardObjectImage } from "@/shared/lib/clipboard-image";
 import {
-  loadProtectedMarkdownImageBlobURL,
+  loadProtectedMarkdownImageBlob,
   resolveMarkdownImageSource,
   resolveProtectedMarkdownImageSource,
 } from "@/shared/lib/markdown-image-source";
@@ -30,14 +31,12 @@ export function useImageDisplaySource(src: string | undefined): ImageDisplaySour
     }
     const controller = new AbortController();
     let blobURL = "";
-    void loadProtectedMarkdownImageBlobURL(protectedSrc, controller.signal)
-      .then((nextBlobURL) => {
-        blobURL = nextBlobURL;
-        if (controller.signal.aborted) {
-          URL.revokeObjectURL(blobURL);
-          return;
-        }
-        setBlob({ source: protectedSrc, url: blobURL });
+    void loadProtectedMarkdownImageBlob(protectedSrc, controller.signal)
+      .then(async (bytes) => {
+        if (controller.signal.aborted) return;
+        blobURL = URL.createObjectURL(bytes);
+        await prepareClipboardObjectImage(blobURL, bytes, controller.signal);
+        if (!controller.signal.aborted) setBlob({ source: protectedSrc, url: blobURL });
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") {
@@ -48,6 +47,7 @@ export function useImageDisplaySource(src: string | undefined): ImageDisplaySour
     return () => {
       controller.abort();
       if (blobURL) {
+        forgetClipboardObjectImage(blobURL);
         URL.revokeObjectURL(blobURL);
       }
     };

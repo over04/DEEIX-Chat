@@ -1,3 +1,4 @@
+import { formulaSource, RENDERED_MATH } from "./clipboard-math";
 import { type SourceOffset, type SourceRange, sourceOffsetMap } from "./markdown-source";
 
 const SCOPE = "[data-md-copy-scope]";
@@ -28,7 +29,8 @@ function readRange(element: HTMLElement, scope: CopyScope, text = false): Source
   if (start != null && end != null && start < end && end <= scope.document.source.length) return [start, end];
 }
 
-function asElement(node: Node) { return node instanceof HTMLElement ? node : node.parentElement; }
+function isElement(node: Node): node is Element { return node.nodeType === 1; }
+function asElement(node: Node) { return isElement(node) ? node : node.parentElement; }
 
 function clipTextContent(node: HTMLElement, selection: Range): { start: number; end: number; text: string } | undefined {
   const text = node.textContent ?? "";
@@ -48,18 +50,6 @@ function clipTextContent(node: HTMLElement, selection: Range): { start: number; 
     end = prefix.toString().length;
   }
   if (end > start) return { start, end, text };
-}
-
-function atomicSource(element: HTMLElement, scope: CopyScope) {
-  const range = readRange(element, scope);
-  return range && scope.document.source.slice(...range);
-}
-
-export function getCopyableMarkdownSource(element: HTMLElement): string | undefined {
-  const atomic = element.closest<HTMLElement>("[data-md-atomic]");
-  const registered = atomic?.closest<HTMLElement>(SCOPE);
-  const scope = registered && scopeSources.get(registered);
-  return atomic && scope ? atomicSource(atomic, scope) : undefined;
 }
 
 type Hit = { element: HTMLElement; scope: CopyScope; range: SourceRange; start: number; end: number; explicit?: string };
@@ -211,27 +201,27 @@ export function selectedMarkdown(selection: Selection, owner: Document): string 
   if (groups.size) return Array.from(groups.values(), renderHits).join("\n\n");
 }
 
-const listeners = new WeakMap<Document, { users: number; onCopy: (event: ClipboardEvent) => void }>();
+const FORMULA = RENDERED_MATH + ", [data-md-atomic='math']";
 
-export function listenForMarkdownSelectionCopy(owner: Document) {
-  let listener = listeners.get(owner);
-  if (!listener) {
-    listener = { users: 0, onCopy: (event) => {
-      const selection = owner.getSelection();
-      if (event.defaultPrevented || !event.clipboardData || !selection) return;
-      const markdown = selectedMarkdown(selection, owner);
-      if (!markdown) return;
-      event.clipboardData.clearData();
-      event.clipboardData.setData("text/plain", markdown);
-      event.preventDefault();
-    } };
-    owner.addEventListener("copy", listener.onCopy);
-    listeners.set(owner, listener);
+export function messageSelectionSource(root: HTMLElement): { markdown?: string; latex?: string } | undefined {
+  const owner = root.ownerDocument;
+  const selection = owner.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+  const range = selection.getRangeAt(0);
+  if (!range.intersectsNode(root)) return;
+  const contained = root.contains(range.startContainer) && root.contains(range.endContainer);
+  const markdownRoot = "[data-chat-markdown-scope]";
+  let markdown: string | undefined;
+  if (root.matches(markdownRoot) || root.querySelector(markdownRoot)) {
+    markdown = selectedMarkdown(selection, owner);
+  } else if (contained) {
+    markdown = selection.toString();
   }
-  listener.users++;
-  return () => {
-    if (!listener || --listener.users > 0) return;
-    owner.removeEventListener("copy", listener.onCopy);
-    listeners.delete(owner);
-  };
+  let atom = contained ? asElement(range.commonAncestorContainer)?.closest(FORMULA) : undefined;
+  if (!atom && contained && range.startContainer === range.endContainer && range.endOffset === range.startOffset + 1) {
+    const node = range.startContainer.childNodes[range.startOffset];
+    if (node && isElement(node) && node.matches(FORMULA)) atom = node;
+  }
+  const latex = atom ? formulaSource(atom) : undefined;
+  return markdown || latex ? { markdown, latex } : undefined;
 }

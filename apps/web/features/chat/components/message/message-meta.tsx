@@ -44,6 +44,8 @@ import { type BillingSnapshot, parseBillingSnapshot } from "@/features/chat/mode
 import { resolvePersistedPublicID } from "@/features/chat/model/message-submit";
 import type { ChatBillingCost, ChatMessageBranchNavigator } from "@/features/chat/types/messages";
 import { cn } from "@/lib/utils";
+import { MarkdownSourceCopyMenu } from "@/shared/components/markdown/markdown-source-copy-menu";
+import { useRenderedCopy } from "@/shared/components/markdown/use-rendered-copy";
 import { usePointerInteraction } from "@/shared/hooks/use-pointer-interaction";
 import {
   type BillingDisplayCurrency,
@@ -64,6 +66,7 @@ const META_ACTION_BUTTON_CLASSNAME =
 
 type ChatMetaMessage = {
   publicID: string;
+  content: string;
   parentPublicID?: string | null;
   status?: string;
   createdAt?: string;
@@ -271,6 +274,27 @@ function MetaIconButton({
   );
 }
 
+function MessageCopyControls({ source, bodyRef, label, disabled }: {
+  source: string;
+  bodyRef: React.RefObject<HTMLDivElement | null>;
+  label: string;
+  disabled?: boolean;
+}) {
+  const t = useTranslations("chat.messages");
+  const { copyRendered, copied, pending } = useRenderedCopy({
+    copied: t("copied"), failed: t("copyFailed"), failedDescription: t("copyFailedDescription"), empty: t("copyEmpty"),
+  });
+
+  return (
+    <div className="inline-flex items-center" data-screenshot-exclude="true">
+      <MetaIconButton label={label} disabled={disabled || pending} onClick={() => void copyRendered(bodyRef.current)}>
+        {copied ? <Check strokeWidth={1.8} animate="default" /> : <Copy strokeWidth={1.8} animateOnHover="default" />}
+      </MetaIconButton>
+      <MarkdownSourceCopyMenu source={source} bodyRef={bodyRef} disabled={disabled || pending} className={cn(META_ACTION_BUTTON_CLASSNAME, "w-5")} />
+    </div>
+  );
+}
+
 function ForkMessageButton({
   disabled = false,
   label,
@@ -372,9 +396,8 @@ export function UserMessageMeta({
   onCycleBranch,
   onRetry,
   onEdit,
-  onCopy,
+  copyBodyRef,
   onDelete,
-  copySucceeded = false,
   readOnly = false,
   alwaysVisible = false,
   showBranchNavigator = true,
@@ -384,9 +407,8 @@ export function UserMessageMeta({
   onCycleBranch: (parentPublicID: string | null, direction: "previous" | "next") => void;
   onRetry: () => void;
   onEdit: () => void;
-  onCopy: () => void;
+  copyBodyRef: React.RefObject<HTMLDivElement | null>;
   onDelete?: () => Promise<void> | void;
-  copySucceeded?: boolean;
   readOnly?: boolean;
   alwaysVisible?: boolean;
   showBranchNavigator?: boolean;
@@ -420,17 +442,7 @@ export function UserMessageMeta({
           >
             <Brush strokeWidth={1.8} animateOnHover="default" />
           </MetaIconButton>
-          <MetaIconButton
-            label={t("copyMessage")}
-            disabled={messagePending}
-            onClick={onCopy}
-          >
-            {copySucceeded ? (
-              <Check strokeWidth={1.8} animate="default" />
-            ) : (
-              <Copy strokeWidth={1.8} animateOnHover="default" />
-            )}
-          </MetaIconButton>
+          <MessageCopyControls source={item.content} bodyRef={copyBodyRef} label={t("copyMessage")} disabled={messagePending} />
           {/* The backend forbids deleting the root message (empty parentPublicID), so the UI doesn't show the entry at all. */}
           {onDelete && hasPersistedMessage && item.parentPublicID ? (
             <DeleteMessageButton
@@ -444,6 +456,8 @@ export function UserMessageMeta({
             />
           ) : null}
         </div>
+      ) : item.content.trim() ? (
+        <MessageCopyControls source={item.content} bodyRef={copyBodyRef} label={t("copyMessage")} />
       ) : null}
       {canShowBranchNavigator ? <BranchSwitcher item={item} onCycle={onCycleBranch} /> : null}
     </MetaContainer>
@@ -1017,10 +1031,9 @@ export function AssistantMessageMeta({
   onRetry,
   onContinue,
   onEdit,
-  onCopy,
+  copyBodyRef,
   onFork,
   onDelete,
-  copySucceeded = false,
   onReact,
   showModelInfo = true,
   showLatency = true,
@@ -1039,10 +1052,9 @@ export function AssistantMessageMeta({
   onRetry: () => void;
   onContinue?: () => void;
   onEdit?: () => void;
-  onCopy: () => void;
+  copyBodyRef: React.RefObject<HTMLDivElement | null>;
   onFork?: () => Promise<void> | void;
   onDelete?: () => Promise<void> | void;
-  copySucceeded?: boolean;
   onReact: (value: AssistantReaction) => void;
   showModelInfo?: boolean;
   showLatency?: boolean;
@@ -1099,7 +1111,8 @@ export function AssistantMessageMeta({
     }),
     [billingDisplayCurrency, billingDisplayUsdToCnyRate],
   );
-  const hasActionRow = Boolean(timestamp || !readOnly || canShowBranchNavigator);
+  const canCopy = !readOnly || Boolean(item.content.trim());
+  const hasActionRow = Boolean(timestamp || canCopy || canShowBranchNavigator);
 
   return (
     <MetaContainer align="start" alwaysVisible={alwaysVisible}>
@@ -1123,19 +1136,11 @@ export function AssistantMessageMeta({
         ) : null}
         {hasActionRow ? (
           <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1">
+            {canCopy ? (
+              <MessageCopyControls source={item.content} bodyRef={copyBodyRef} label={t("copyReply")} disabled={!readOnly && !item.publicID} />
+            ) : null}
             {!readOnly ? (
               <>
-                <MetaIconButton
-                  label={t("copyReply")}
-                  disabled={!item.publicID}
-                  onClick={onCopy}
-                >
-                  {copySucceeded ? (
-                    <Check strokeWidth={1.8} animate="default" />
-                  ) : (
-                    <Copy strokeWidth={1.8} animateOnHover="default" />
-                  )}
-                </MetaIconButton>
                 {canEdit ? (
                   <MetaIconButton
                     label={t("editReply")}

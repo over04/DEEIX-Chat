@@ -40,7 +40,6 @@ import type { ChatAreaMessage, MessageAttachment, UserMessageEditMode } from "@/
 import { cn } from "@/lib/utils";
 import { AppLogo, DeeixLogo } from "@/shared/components/app-logo";
 import { ConversationShareExportIconDropdown } from "@/entities/conversation";
-import { useCopyAction } from "@/shared/components/copy-action";
 import type { FileContentLoader } from "@/entities/file";
 import { StreamdownRender } from "@/shared/components/markdown/streamdown-render";
 import { PoweredByDeeix } from "@/shared/components/powered-by-deeix";
@@ -362,14 +361,6 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
     />
   );
 
-  const t = useTranslations("chat.messages");
-  const { copy, isCopied } = useCopyAction({
-    messages: {
-      copied: t("copied"),
-      failed: t("copyFailed"),
-      failedDescription: t("copyFailedDescription"),
-    },
-  });
   const isUser = item.role === "user";
   const isAssistant = item.role === "assistant";
   // Read-only rows (screenshots of a shared view) keep block changes local.
@@ -397,9 +388,6 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
     [item.platformModelName, modelOptions],
   );
 
-  const copyKey = item.publicID || item.key;
-  const onCopy = React.useCallback(() => copy(item.content, { key: copyKey }), [copy, copyKey, item.content]);
-
   if (isUser) {
     return (
       <ChatMessageUser
@@ -412,8 +400,6 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
         onModelChange={onModelChange}
         onModelCatalogRefresh={onModelCatalogRefresh}
         onCycleMessageBranch={onCycleMessageBranch}
-        onCopy={() => void onCopy()}
-        copySucceeded={isCopied(copyKey)}
         attachmentContentLoader={attachmentContentLoader}
         readOnly={readOnly}
         sendShortcut={sendShortcut}
@@ -435,8 +421,6 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
         onDeleteMessage={onDeleteMessage}
         onCycleMessageBranch={onCycleMessageBranch}
         onReactAssistantMessage={onReactAssistantMessage}
-        onCopy={() => void onCopy()}
-        copySucceeded={isCopied(copyKey)}
         attachmentContentLoader={attachmentContentLoader}
         onEditImageAttachment={onEditImageAttachment}
         onExtendVideoAttachment={

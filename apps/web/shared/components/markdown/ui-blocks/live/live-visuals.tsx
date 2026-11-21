@@ -3,10 +3,12 @@
 import type { ResolvedNode } from "@deeix/core";
 import { formulaToLatex } from "@deeix/core";
 import katex from "katex";
+import { useTranslations } from "next-intl";
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
 import { isRecord } from "@/shared/lib/type-guards";
+import { useRenderedCopy } from "../../use-rendered-copy";
 import { LIVE_TONES, type LiveTone, readNumber, readText, useLiveBlock } from "./live-context";
 
 // Two primitives for explaining a relationship rather than listing data:
@@ -52,11 +54,35 @@ export function LiveFormula({ node }: { node: ResolvedNode }) {
 }
 
 function KatexLine({ latex, className }: { latex: string; className?: string }) {
-  const html = React.useMemo(() => katex.renderToString(latex, { throwOnError: false, output: "html", strict: "ignore" }), [latex]);
-  // The LaTeX comes from formulaToLatex: built from a parsed AST, with names
-  // restricted to identifiers and units escaped.
-  // biome-ignore lint/security/noDangerouslySetInnerHtml: KaTeX markup built from a parsed AST
-  return <span className={cn("[&_.katex]:text-[1em]", className)} dangerouslySetInnerHTML={{ __html: html }} />;
+  const html = React.useMemo(() => katex.renderToString(latex, { throwOnError: false, output: "htmlAndMathml", strict: "ignore" }), [latex]);
+  const t = useTranslations("chat.markdown");
+  const { copyRendered } = useRenderedCopy({ copied: t("formulaCopied"), failed: t("formulaCopyFailed") }, false);
+  const label = t("copyFormula");
+  return (
+    <span
+      className={cn("cursor-copy [&_.katex]:text-[1em] focus-visible:outline-2 focus-visible:outline-ring", className)}
+      data-clipboard-formula="block"
+      data-formula-copyable="true"
+      role="button"
+      tabIndex={0}
+      title={label}
+      aria-label={label}
+      onClick={(event) => {
+        if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+        const selection = event.currentTarget.ownerDocument.getSelection();
+        if (selection && !selection.isCollapsed) return;
+        void copyRendered(event.currentTarget);
+      }}
+      onKeyDown={(event) => {
+        if (event.defaultPrevented || event.repeat || (event.key !== "Enter" && event.key !== " ")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        void copyRendered(event.currentTarget);
+      }}
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: KaTeX markup from a parsed formula AST
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
 
 // ---- scene ----

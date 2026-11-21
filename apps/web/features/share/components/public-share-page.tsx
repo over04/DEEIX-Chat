@@ -184,7 +184,6 @@ function PublicSharedMessage({
         onRetryUserMessage={noopAsync}
         onEditUserMessage={async () => false}
         onCycleMessageBranch={onCycleBranch}
-        onCopy={noop}
         readOnly
         attachmentContentLoader={loadContent}
         showBranchNavigator
@@ -201,7 +200,6 @@ function PublicSharedMessage({
         onEditAssistantMessage={async () => false}
         onCycleMessageBranch={onCycleBranch}
         onReactAssistantMessage={noop}
-        onCopy={noop}
         showModelInfo
         showLatency
         showTokenUsage

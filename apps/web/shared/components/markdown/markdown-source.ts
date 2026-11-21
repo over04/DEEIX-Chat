@@ -132,7 +132,7 @@ export const rehypeMarkdownCopySource = (function rehypeMarkdownCopySource() {
         if (range) {
           node.properties ??= {};
           node.properties["data-md-range"] = range;
-          if (ATOMIC_TAGS.has(tag) || tag === "code") node.properties["data-md-atomic"] = tag;
+          if (ATOMIC_TAGS.has(tag) || tag === "code" || tag === "math") node.properties["data-md-atomic"] = tag;
           else if (INLINE_TAGS.has(tag)) node.properties["data-md-inline"] = tag;
         }
         if (!ATOMIC_TAGS.has(tag) && tag !== "code" && tag !== "math" && tag !== "svg") decorate(node);

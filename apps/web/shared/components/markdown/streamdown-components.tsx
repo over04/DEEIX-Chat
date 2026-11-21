@@ -757,6 +757,7 @@ export function MarkdownImage({ alt, className, onError, onLoad, src: srcProp, n
         className={cn("group relative my-4 block w-fit max-w-full sm:max-w-[32rem]", className)}
         {...sourceProps}
         data-incomplete="true"
+        data-clipboard-image-unavailable=""
         data-streamdown="image-wrapper"
       >
         <span className="block min-h-28 min-w-48 animate-pulse rounded-xl border border-border/60 bg-muted/20 sm:min-w-80" />
@@ -772,6 +773,7 @@ export function MarkdownImage({ alt, className, onError, onLoad, src: srcProp, n
     <span
       {...sourceProps}
       className={cn("group relative my-4 block w-fit max-w-full sm:max-w-[32rem]", className)}
+      data-clipboard-image-unavailable={failed || !displaySrc ? "" : undefined}
       data-streamdown="image-wrapper"
     >
       {failed ? (

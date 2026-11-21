@@ -108,11 +108,12 @@ export async function downloadMarkdownImageSource(src: string, fileName: string)
   }
 }
 
-export async function loadProtectedMarkdownImageBlobURL(src: string, signal: AbortSignal): Promise<string> {
+export async function loadProtectedMarkdownImageBlob(src: string, signal: AbortSignal): Promise<Blob> {
   const protectedPath = resolveProtectedMarkdownImagePath(src);
   if (!protectedPath) {
     throw new Error("Not a protected image source");
   }
   const response = await fetchProtectedMarkdownImage(protectedPath, signal);
-  return URL.createObjectURL(await response.blob());
+  if (!response.ok) throw new Error("Failed to load image");
+  return response.blob();
 }

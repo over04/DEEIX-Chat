@@ -5,7 +5,7 @@ import { Check, Copy } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { writeClipboardText } from "@/shared/lib/clipboard";
+import { type RichClipboardContent, writeClipboardText, writeRichClipboard } from "@/shared/lib/clipboard";
 
 export type CopyActionMessages = {
   copied: string;
@@ -53,9 +53,8 @@ export function useCopyAction({ messages, resetDelayMs = 1500 }: CopyActionOptio
   React.useEffect(() => reset, [reset]);
 
   const copy = React.useCallback(
-    async (value: string, overrides: CopyActionInput = {}): Promise<boolean> => {
-      const text = value.trim() ? value : "";
-      if (!text) {
+    async (value: string | RichClipboardContent | undefined, overrides: CopyActionInput = {}): Promise<boolean> => {
+      if (value == null || (typeof value === "string" ? !value.trim() : !value.html)) {
         setCopied(false);
         setCopiedKey(null);
         const emptyMessage = overrides.empty ?? messages.empty;
@@ -68,7 +67,8 @@ export function useCopyAction({ messages, resetDelayMs = 1500 }: CopyActionOptio
       setPending(true);
       clearResetTimer();
       try {
-        await writeClipboardText(text);
+        if (typeof value === "string") await writeClipboardText(value);
+        else await writeRichClipboard(value);
         setCopied(true);
         setCopiedKey(overrides.key ?? null);
         toast.success(overrides.copied ?? messages.copied, {
