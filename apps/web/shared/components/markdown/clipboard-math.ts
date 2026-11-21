@@ -64,6 +64,33 @@ export function copyMath(element: Element, owner: Document): Element | undefined
   return math;
 }
 
+export function copySelectedMath(element: Element, owner: Document, range: Range): Node | undefined {
+  const visual = element.querySelector(".katex-html") ?? (element.matches("math") ? element : element.querySelector("math"));
+  if (!visual) return;
+  const walker = visual.ownerDocument.createTreeWalker(visual, 4 /* SHOW_TEXT */);
+  let selected = "";
+  let hasVisibleGlyphs = false;
+  let complete = true;
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const text = node.nodeValue ?? "";
+    if (!text || node.parentElement?.closest("annotation, annotation-xml, mphantom, .phantom")) continue;
+    hasVisibleGlyphs = true;
+    if (!range.intersectsNode(node)) {
+      complete = false;
+      continue;
+    }
+    const start = range.startContainer === node ? range.startOffset : 0;
+    const end = range.endContainer === node ? range.endOffset : text.length;
+    if (start || end !== text.length) complete = false;
+    selected += text.slice(start, end);
+  }
+  if (complete && (hasVisibleGlyphs || range.commonAncestorContainer.contains(element))) return copyMath(element, owner);
+  // A visual fragment does not necessarily have a matching MathML subtree
+  // (for example just the base of a superscript). Copy only the chosen glyphs.
+  return selected ? owner.createTextNode(selected) : undefined;
+}
+
 const SUPER = "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾";
 const SUB = "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎";
 const SCRIPT_BASE = "0123456789+-=()";

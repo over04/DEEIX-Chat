@@ -120,7 +120,7 @@ function Chart({ id, props }: UIBlockRenderProps<ChartProps>) {
   return (
     <div className="px-4 pb-4 pt-5">
       {props.title ? <h3 className="mb-3 text-lg font-semibold leading-7">{props.title}</h3> : null}
-      <ChartContainer id={id} config={config} className="aspect-auto h-64 w-full">
+      <ChartContainer id={id} config={config} data-clipboard-chart="" className="aspect-auto h-64 w-full">
         {props.type === "pie" ? (
           <PieChartBody rows={rows} series={props.series} hidden={hidden} />
         ) : props.type === "funnel" ? (
@@ -163,7 +163,7 @@ function Chart({ id, props }: UIBlockRenderProps<ChartProps>) {
         )}
       </ChartContainer>
       {legend.length > 1 ? (
-        <div className="mt-2">
+        <div className="mt-2" data-clipboard-chart-legend="">
           <ChartInteractiveLegend items={legend} hiddenSeries={hidden} onToggle={toggle} />
         </div>
       ) : null}

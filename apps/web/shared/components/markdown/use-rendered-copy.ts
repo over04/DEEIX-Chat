@@ -4,7 +4,7 @@ import * as React from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 
-import { type CopyActionMessages, useCopyAction } from "@/shared/components/copy-action";
+import { type CopyActionInput, type CopyActionMessages, useCopyAction } from "@/shared/components/copy-action";
 import { ClipboardImageUnavailable } from "@/shared/lib/clipboard-image";
 import { listenForRichSelectionCopy, renderedRichClipboard } from "./markdown-rich-copy";
 
@@ -18,9 +18,9 @@ export function useRenderedCopy(messages: CopyActionMessages, trackSelection = t
     if (trackSelection) return listenForRichSelectionCopy(document, report);
   }, [report, trackSelection]);
 
-  const copyRendered = React.useCallback((root: Element | null) => {
+  const copyRendered = React.useCallback((root: Element | null, overrides?: CopyActionInput) => {
     try {
-      return copy(root ? renderedRichClipboard(root) : undefined);
+      return copy(root ? renderedRichClipboard(root) : undefined, overrides);
     } catch (error) {
       reset();
       report(error);

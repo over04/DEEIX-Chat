@@ -21,6 +21,7 @@ await build({ stdin: { contents: [
   'export { StreamdownRender } from "./shared/components/markdown/streamdown-render";',
   'export * from "./shared/components/markdown/markdown-selection-copy";',
   'export * from "./shared/components/markdown/markdown-rich-copy";',
+  'export { MarkdownMermaidContent } from "./shared/components/markdown/streamdown-mermaid";',
   'export { writeRichClipboard } from "./shared/lib/clipboard";',
   'export { ClipboardImageUnavailable, forgetClipboardObjectImage, prepareClipboardObjectImage } from "./shared/lib/clipboard-image";',
   'export { resolveClipboardMarkdownPaste } from "./features/chat/utils/markdown-paste";',
@@ -32,7 +33,7 @@ await build({ stdin: { contents: [
   'export { normalizeHTMLBlockBlankLines } from "./shared/components/markdown/streamdown-mixed-markup";',
 ].join("\n"), resolveDir: process.cwd() }, outfile, bundle: true, format: "esm", platform: "node", packages: "external", jsx: "automatic" });
 const {
-  AssistantMessageMeta, ClipboardImageUnavailable, LiveBlockContext, LiveFormula, StreamdownRender, UserMessageMeta,
+  AssistantMessageMeta, ClipboardImageUnavailable, LiveBlockContext, LiveFormula, MarkdownMermaidContent, StreamdownRender, UserMessageMeta,
   forgetClipboardObjectImage, functionPlotDefinition, listenForRichSelectionCopy, messageSelectionSource, normalizeHTMLBlockBlankLines,
   prepareClipboardObjectImage, registerMarkdownCopyScope, renderedRichClipboard, resolveClipboardMarkdownPaste,
   selectedMarkdown, selectionRichClipboard, sourceOffsetMap, writeRichClipboard,
@@ -593,6 +594,66 @@ test("partial code selection preserves fence and selected newlines without line 
   assert.equal(selectionRichClipboard(selection, owner).text, "irst\nsec");
 });
 
+const selectionFixture = [
+  "2. **刷新当前会话**：用终端运行", "", "   ~~~bash", "   newgrp docker", "     printf '%s' \"$USER\"", "   ~~~", "",
+  "   如果失败，请检查 `usermod` 命令。", "", "3. 第二项的后续操作。", "", "列表外的段落。",
+].join("\n");
+
+function firstText(element) {
+  return element.ownerDocument.createTreeWalker(element, 4).nextNode();
+}
+
+function lastText(element) {
+  const walker = element.ownerDocument.createTreeWalker(element, 4);
+  let last;
+  while (walker.nextNode()) last = walker.currentNode;
+  return last;
+}
+
+test("code-only selection in item 2 preserves exact characters without either kind of numbering", (context) => {
+  const dom = render(selectionFixture);
+  const { owner, select, t } = setupSelection(dom);
+  t(context);
+  const code = owner.querySelector('ol[start="2"] li pre code');
+  assert.ok(code, "expected a code block inside item 2");
+  const firstLine = code.firstElementChild;
+  const start = firstText(firstLine);
+  const end = lastText(firstLine);
+  const content = selectionRichClipboard(select(start, 0, end, end.length), owner);
+  assert.equal(content.text, "newgrp docker");
+  assert.match(content.html, /<pre\b.*<code\b[^>]*class="language-bash"/s);
+  assert.doesNotMatch(content.html, /<(?:ol|ul|li)\b|data-deeix-code-language|printf/);
+  const snippet = selectionRichClipboard(select(end, 1, end, end.length - 1), owner);
+  assert.equal(snippet.text, end.data.slice(1, -1));
+  const full = selectionRichClipboard(select(code, 0, code, code.childNodes.length), owner);
+  assert.equal(full.text, "newgrp docker\n  printf '%s' \"$USER\"");
+  assert.deepEqual(full, renderedRichClipboard(code.parentElement));
+});
+
+test("mixed selection pastes prose, a separate language label, code, and following prose", (context) => {
+  const dom = render(selectionFixture);
+  const { owner, select, t } = setupSelection(dom);
+  t(context);
+  installBrowserGlobals(context, { DOMParser: dom.window.DOMParser });
+  const item = owner.querySelector('ol[start="2"] > li');
+  const begin = firstText(item.querySelector("strong"));
+  const end = lastText(item.querySelector("p:last-of-type"));
+  const content = selectionRichClipboard(select(begin, 0, end, end.length), owner);
+  assert.equal(content.text, "刷新当前会话：用终端运行\n\nbash\n\nnewgrp docker\n  printf '%s' \"$USER\"\n\n如果失败，请检查 usermod 命令。");
+  const pasted = new JSDOM(content.html);
+  context.after(() => pasted.window.close());
+  const rich = pasted.window.document;
+  assert.equal(rich.querySelector("ol, ul, button"), null);
+  assert.equal(rich.querySelector("strong").textContent, "刷新当前会话");
+  assert.equal(rich.querySelector("[data-deeix-code-language]").textContent, "bash");
+  assert.equal(rich.querySelector("pre code").textContent, "newgrp docker\n  printf '%s' \"$USER\"");
+  assert.equal(rich.querySelector("p:last-of-type code").textContent, "usermod");
+  const composer = resolveClipboardMarkdownPaste({ getData: (type) => ({ "text/html": content.html, "text/plain": content.text })[type] ?? "" });
+  assert.match(composer.markdown, /\u0060{3}bash\nnewgrp docker\n {2}printf/);
+  assert.doesNotMatch(composer.markdown, /^bash$/m);
+  assert.match(composer.markdown, /\*\*刷新当前会话\*\*/);
+  assert.match(composer.markdown, /\u0060usermod\u0060/);
+});
 
 test("whole-message copy preserves structure, table styles, code whitespace, and both kinds of math", (context) => {
   const source = [
@@ -639,16 +700,266 @@ test("whole-message copy preserves structure, table styles, code whitespace, and
   assert.equal(equation.text.includes("a, b; c, d"), true);
 });
 
-test("clipping preserves list numbering and omits controls and unsafe markup", (context) => {
-  const dom = new JSDOM('<div data-chat-message-copy-body><ol start="4"><li>未选</li><li><strong>选中</strong><button>不要复制</button><a href="javascript:alert(1)">链接</a><span hidden>隐藏</span></li><li>尾部</li></ol></div>');
+test("crossing list items keeps only the item openings in the range and their original numbers", (context) => {
+  const dom = new JSDOM('<div data-chat-message-copy-body><ol start="4"><li>未选</li><li><strong>选中</strong><button>不要复制</button><a href="javascript:alert(1)">链接</a><span hidden>隐藏</span></li><li value="9">下一项</li></ol><p>列表外</p></div>');
   const { owner, select, t } = setupSelection(dom);
   t(context);
   const start = owner.querySelector("strong").firstChild;
-  const end = owner.querySelector("a").firstChild;
+  const end = owner.querySelector("p").firstChild;
   const content = selectionRichClipboard(select(start, 1, end, 2), owner);
-  assert.equal(content.text, "5. 中链接");
-  assert.match(content.html, /<ol start="5"><li><strong>中<\/strong><a>链接<\/a><\/li><\/ol>/);
-  assert.doesNotMatch(content.html, /未选|尾部|不要复制|隐藏|javascript/);
+  assert.equal(content.text, "中链接\n\n9. 下一项\n\n列表");
+  const pasted = new JSDOM(content.html);
+  context.after(() => pasted.window.close());
+  assert.equal(pasted.window.document.querySelector("ol").start, 9);
+  assert.equal(pasted.window.document.querySelector("ol").textContent, "下一项");
+  assert.equal(pasted.window.document.querySelector("strong").textContent, "中");
+  assert.doesNotMatch(content.html, /未选|列表外|不要复制|隐藏|javascript/);
+  const whole = renderedRichClipboard(owner.querySelector("[data-chat-message-copy-body]"));
+  assert.equal(whole.text, "4. 未选\n5. 选中链接\n9. 下一项\n\n列表外");
+});
+
+test("selected inline spaces, quote and cell fragments, and mathematical glyphs stay in range", (context) => {
+  const dom = render(["行内代码： `a   b`", "", "> **引用内容**", "", "| 标题 | 另一个 |", "| --- | --- |", "| abc | def |", "", "$x^2$"].join("\n"));
+  const { owner, select, t } = setupSelection(dom);
+  t(context);
+  installBrowserGlobals(context, { DOMParser: dom.window.DOMParser });
+  const inlineCode = owner.querySelector("code");
+  const inline = firstText(inlineCode);
+  const inlineCopy = selectionRichClipboard(select(inline, 0, inline, inline.length), owner);
+  assert.equal(inlineCopy.text, "a   b");
+  assert.deepEqual(inlineCopy, renderedRichClipboard(inlineCode));
+  const quote = firstText(owner.querySelector("blockquote strong"));
+  const quoted = selectionRichClipboard(select(quote, 1, quote, 3), owner);
+  assert.equal(quoted.text, "用内");
+  assert.match(quoted.html, /<strong[^>]*>用内<\/strong>/);
+  assert.doesNotMatch(quoted.html, /<blockquote|<p\b/);
+  const paste = resolveClipboardMarkdownPaste({ getData: (type) => type === "text/html" ? quoted.html : "" });
+  assert.equal(paste.block, false);
+  assert.equal(paste.markdown, "**用内**");
+  const cell = firstText(owner.querySelector("td"));
+  const oneCell = selectionRichClipboard(select(cell, 0, cell, 2), owner);
+  assert.equal(oneCell.text, "ab");
+  assert.doesNotMatch(oneCell.html, /<table|<td/);
+  const otherCell = firstText(owner.querySelector("td:last-child"));
+  const cells = selectionRichClipboard(select(cell, 1, otherCell, 2), owner);
+  assert.equal(cells.text, "bc\tde");
+  assert.match(cells.html, /<table/);
+  const math = owner.querySelector(".katex-html");
+  const glyph = firstText(math);
+  const partial = selectionRichClipboard(select(glyph, 0, glyph, 1), owner);
+  assert.equal(partial.text, "x");
+  assert.doesNotMatch(partial.html, /msup|annotation/);
+  const last = lastText(math);
+  const full = selectionRichClipboard(select(glyph, 0, last, last.length), owner);
+  assert.equal(full.text, "x²");
+  assert.match(full.html, /<msup>/);
+});
+
+test("selecting linked code keeps its link and formatted paste keeps hard breaks", (context) => {
+  const dom = new JSDOM('<article data-chat-message-copy-body><p><strong><a href="https://example.test/"><code>a   b</code></a></strong><br>下一行</p></article>');
+  const { owner, select, t } = setupSelection(dom);
+  t(context);
+  installBrowserGlobals(context, { DOMParser: dom.window.DOMParser });
+  const code = owner.querySelector("code").firstChild;
+  const selected = selectionRichClipboard(select(code, 0, code, code.length), owner);
+  assert.equal(selected.text, "a   b");
+  const output = new JSDOM(selected.html);
+  context.after(() => output.window.close());
+  assert.equal(output.window.document.querySelector("strong a code").textContent, "a   b");
+  assert.equal(output.window.document.querySelector("a").href, "https://example.test/");
+  const paste = resolveClipboardMarkdownPaste({ getData: (type) => type === "text/html" ? "<p>甲<br>乙</p>" : "" });
+  const preview = render(paste.markdown);
+  context.after(() => preview.window.close());
+  assert.ok(preview.window.document.querySelector("p br"));
+});
+
+test("copying structure does not remove blank columns or renumber after an empty list item", (context) => {
+  const dom = new JSDOM('<article data-chat-message-copy-body><table><tbody><tr><td>A</td><td></td><td>C</td></tr></tbody></table><ol start="2"><li>前</li><li></li><li>后</li></ol></article>');
+  const { owner, select, t } = setupSelection(dom);
+  t(context);
+  const root = owner.querySelector("article");
+  const cells = root.querySelectorAll("td");
+  const selection = selectionRichClipboard(select(cells[0].firstChild, 0, cells[2].firstChild, 1), owner);
+  assert.equal(selection.text, "A\t\tC");
+  const all = renderedRichClipboard(root);
+  assert.equal(all.text, "A\t\tC\n\n2. 前\n3. \n4. 后");
+  const output = new JSDOM(all.html);
+  context.after(() => output.window.close());
+  assert.equal(output.window.document.querySelectorAll("td").length, 3);
+  assert.equal(output.window.document.querySelectorAll("li").length, 3);
+});
+
+test("resolved colors survive copying and safe highlights survive pasting to the composer", (context) => {
+  const dom = new JSDOM('<style>code { color: #732116; background-color: #ffefd4 }</style><div data-chat-markdown-scope><p><span style="color:#663c00;background-color:#fde68a">高亮文字</span> <code>foo</code></p></div>');
+  context.after(() => dom.window.close());
+  installBrowserGlobals(context, { DOMParser: dom.window.DOMParser });
+  const content = renderedRichClipboard(dom.window.document.querySelector("[data-chat-markdown-scope]"));
+  const pasted = new JSDOM(content.html);
+  context.after(() => pasted.window.close());
+  const code = pasted.window.document.querySelector("code");
+  assert.equal(code.style.color, "rgb(115, 33, 22)");
+  assert.equal(code.style.backgroundColor, "rgb(255, 239, 212)");
+  const markdown = resolveClipboardMarkdownPaste({ getData: (type) => ({ "text/html": content.html, "text/plain": content.text })[type] ?? "" }).markdown;
+  const rendered = render(markdown);
+  context.after(() => rendered.window.close());
+  const highlight = rendered.window.document.querySelector('span[style*="background-color"]');
+  assert.equal(highlight.textContent, "高亮文字");
+  assert.equal(highlight.style.backgroundColor, "rgb(253, 230, 138)");
+});
+
+test("portable clipboard images render after pasting and unsafe SVG is rejected", (context) => {
+  const bitmap = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII=";
+  const dom = new JSDOM(`<div data-chat-message-copy-body><img src="${bitmap}" alt="attached bitmap"><div data-streamdown="mermaid"><div role="img" aria-label="graph"><svg width="100" height="50"><defs><clipPath id="plot"><rect width="100" height="50"/></clipPath></defs><g clip-path="url(#plot)"><path d="M1 1 L10 10" stroke="#443322"/><text>plot (x) &amp; y</text></g></svg></div></div></div>`);
+  context.after(() => dom.window.close());
+  installBrowserGlobals(context, { DOMParser: dom.window.DOMParser });
+  const content = renderedRichClipboard(dom.window.document.querySelector("[data-chat-message-copy-body]"));
+  const pasted = resolveClipboardMarkdownPaste({ getData: (type) => ({ "text/html": content.html, "text/plain": content.text })[type] ?? "" });
+  const preview = render(pasted.markdown);
+  context.after(() => preview.window.close());
+  const images = preview.window.document.images;
+  assert.equal(images.length, 2);
+  assert.equal(images[0].getAttribute("src"), bitmap);
+  const graph = decodeURIComponent(images[1].getAttribute("src").split(",")[1]);
+  assert.match(graph, /clip-path="url\(#plot\)"/);
+  assert.match(graph, /plot \(x\) &amp; y/);
+  assert.equal(renderedRichClipboard(preview.window.document.querySelector("[data-chat-markdown-scope]")).text.includes("plot (x) & y"), true);
+
+  const reject = `data:image/svg+xml;charset=utf-8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg"><image href="https://example.test/image.svg"/></svg>')}`;
+  const unsafe = render(`![blocked](${reject})\n\n[blocked](data:text/html;base64,WA==)`);
+  context.after(() => unsafe.window.close());
+  assert.equal(unsafe.window.document.querySelector('img[src^="data:"],a[href^="data:"]'), null);
+});
+
+test("pasting styled text preserves literal angle brackets and dollar signs", (context) => {
+  const dom = new JSDOM('<p><span style="color: #782137; font-weight: 700">a &lt;b&gt; &amp; $x$</span></p>');
+  context.after(() => dom.window.close());
+  installBrowserGlobals(context, { DOMParser: dom.window.DOMParser });
+  const html = dom.window.document.body.innerHTML;
+  const pasted = resolveClipboardMarkdownPaste({ getData: (type) => type === "text/html" ? html : "" });
+  const preview = render(pasted.markdown);
+  context.after(() => preview.window.close());
+  const span = preview.window.document.querySelector('span[style*="font-weight"]');
+  assert.equal(span.textContent, "a <b> & $x$");
+  assert.equal(span.querySelector("b, math"), null);
+});
+
+test("message copy and a selection spanning a sandbox frame retain the surrounding text", (context) => {
+  const dom = new JSDOM('<article data-chat-message-copy-body><p>Before</p><iframe sandbox="allow-scripts" data-ui-block-id="widget" srcdoc="Widget contents"></iframe><p>After</p></article>');
+  const { owner, select, t } = setupSelection(dom);
+  t(context);
+  const body = owner.querySelector("article");
+  const whole = renderedRichClipboard(body);
+  assert.equal(whole.text, "Before\n\nAfter");
+  assert.doesNotMatch(whole.html, /iframe|Widget contents/);
+
+  const paragraphs = body.querySelectorAll("p");
+  select(paragraphs[0].firstChild, 2, paragraphs[1].firstChild, 3);
+  const formats = new Map();
+  const errors = [];
+  context.after(listenForRichSelectionCopy(owner, (error) => errors.push(error)));
+  const event = new dom.window.Event("copy", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", { value: {
+    clearData: () => formats.clear(),
+    setData: (type, value) => formats.set(type, value),
+  } });
+  body.dispatchEvent(event);
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(formats.get("text/plain"), "fore\n\nAft");
+  assert.doesNotMatch(formats.get("text/html"), /iframe|Widget contents/);
+  assert.deepEqual(errors, []);
+});
+
+test("pasting external HTML code preserves breaks, blank lines, and indentation", (context) => {
+  const dom = new JSDOM();
+  context.after(() => dom.window.close());
+  installBrowserGlobals(context, { DOMParser: dom.window.DOMParser });
+  const formats = {
+    "text/html": '<pre><code class="language-text"><span>line1</span><br><br><span>  line3</span><br>&lt;line4&gt;<br>line5</code></pre>',
+    "text/plain": "line1\n\n  line3\n<line4>\nline5",
+  };
+  const pasted = resolveClipboardMarkdownPaste({ getData: (type) => formats[type] ?? "" });
+  const fence = "\u0060".repeat(3);
+  assert.deepEqual(pasted, { block: true, markdown: fence + "text\n" + formats["text/plain"] + "\n" + fence });
+});
+
+test("styled links keep relative and parenthesized destinations and their titles", (context) => {
+  const dom = new JSDOM();
+  context.after(() => dom.window.close());
+  installBrowserGlobals(context, { DOMParser: dom.window.DOMParser });
+  const html = '<a href="/docs/start" title="Start here" style="color:#732116">Start</a> ' +
+    '<a href="https://example.test/docs/Function_(code)" style="color:#732116">Function</a>';
+  const { markdown } = resolveClipboardMarkdownPaste({ getData: (type) => type === "text/html" ? html : "" });
+  const preview = render(markdown);
+  context.after(() => preview.window.close());
+  const links = Array.from(preview.window.document.querySelectorAll("a[href]"));
+  assert.deepEqual(links.map((link) => link.getAttribute("href")), ["/docs/start", "https://example.test/docs/Function_(code)"]);
+  assert.equal(links[0].title, "Start here");
+  assert.equal(links[0].querySelector("span[style]").style.color, "rgb(115, 33, 22)");
+});
+
+test("plain-text nested lists retain their depth without adding indentation to code", (context) => {
+  const dom = new JSDOM('<article><ol start="10"><li>Main<ul><li>Child<ol><li>Leaf</li></ol><pre><code>one\n  two</code></pre></li></ul></li><li>Next</li></ol></article>');
+  context.after(() => dom.window.close());
+  const { text } = renderedRichClipboard(dom.window.document.querySelector("article"));
+  assert.equal(text, "10. Main\n\n    • Child\n\n      1. Leaf\n\none\n  two\n11. Next");
+});
+
+test("code toolbar writes the trailing blank lines in both clipboard formats", async (context) => {
+  const dom = new JSDOM('<div id="app"></div>', { pretendToBeVisual: true });
+  const { window } = dom;
+  const app = createRoot(window.document.getElementById("app"));
+  const writes = [];
+  context.after(async () => { await React.act(() => app.unmount()); window.close(); });
+  installBrowserGlobals(context, {
+    window, document: window.document, HTMLElement: window.HTMLElement, Element: window.Element,
+    IS_REACT_ACT_ENVIRONMENT: true,
+    ClipboardItem: class { constructor(formats) { this.formats = formats; } },
+    navigator: { clipboard: { write: async (items) => writes.push(items) } },
+  });
+  await React.act(() => app.render(withTranslations(React.createElement(StreamdownRender, { content: "~~~text\none\n\n\n~~~" }))));
+  const button = window.document.querySelector("[data-streamdown='code-block-actions'] button");
+  assert.ok(button);
+  await React.act(async () => button.click());
+  assert.equal(writes.length, 1);
+  const { formats } = writes[0][0];
+  assert.equal(await formats["text/plain"].text(), "one\n\n");
+  const html = new window.DOMParser().parseFromString(await formats["text/html"].text(), "text/html");
+  assert.equal(html.querySelector("pre > code").textContent, "one\n\n");
+});
+
+test("Mermaid copy uses the source button when the visible SVG cannot be exported", async (context) => {
+  const dom = new JSDOM('<div id="app"></div>', { pretendToBeVisual: true });
+  const { window } = dom;
+  const app = createRoot(window.document.getElementById("app"));
+  const richWrites = [];
+  const sourceWrites = [];
+  context.after(async () => { await React.act(() => app.unmount()); window.close(); });
+  installBrowserGlobals(context, {
+    window, document: window.document, HTMLElement: window.HTMLElement, Element: window.Element,
+    IS_REACT_ACT_ENVIRONMENT: true,
+    ClipboardItem: class { constructor(formats) { this.formats = formats; } },
+    navigator: { clipboard: { write: async (items) => richWrites.push(items), writeText: async (text) => sourceWrites.push(text) } },
+  });
+  const h = React.createElement;
+  const chart = "venn-beta\n  set A";
+  function diagram(canExport) {
+    return h(MarkdownMermaidContent, null,
+      h("div", { "data-streamdown": "mermaid" },
+        h("div", { "data-streamdown": "mermaid-block-actions" },
+          h("button", { "data-streamdown": "code-block-copy-button", onClick: () => navigator.clipboard.writeText(chart) }, "Copy")),
+        h("div", { role: "img" }, h("svg", { width: 100, height: 50 }, canExport
+          ? h("text", null, "A")
+          : h("foreignObject", { width: 100, height: 50 }, h("div", null, "A"))))));
+  }
+  await React.act(() => app.render(withTranslations(diagram(false))));
+  await React.act(async () => window.document.querySelector("button").click());
+  assert.deepEqual(sourceWrites, [chart]);
+  assert.equal(richWrites.length, 0);
+  await React.act(() => app.render(withTranslations(diagram(true))));
+  await React.act(async () => window.document.querySelector("button").click());
+  assert.equal(sourceWrites.length, 1);
+  assert.equal(richWrites.length, 1);
+  assert.match(await richWrites[0][0].formats["text/html"].text(), /<img[^>]+data:image\/svg/);
 });
 
 test("toolbar write makes one clipboard item with both representations", async (context) => {

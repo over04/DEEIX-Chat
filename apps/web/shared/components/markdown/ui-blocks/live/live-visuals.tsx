@@ -145,6 +145,7 @@ export function LiveScene({ node }: { node: ResolvedNode }) {
   return (
     <div className="flex min-w-0 items-center justify-center">
       <svg
+        data-clipboard-plot=""
         width={width}
         height={height}
         viewBox={`0 0 ${width} ${height}`}

@@ -198,7 +198,7 @@ function Sparkline({
   return (
     <div ref={ref} className="mt-2 cursor-crosshair touch-none" style={{ height: SPARK_HEIGHT }} onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={() => onHover(null)}>
       {width > 0 ? (
-        <svg width={width} height={SPARK_HEIGHT} className="block overflow-visible" role="img" aria-hidden="true">
+        <svg data-clipboard-plot="" width={width} height={SPARK_HEIGHT} className="block overflow-visible" role="img" aria-hidden="true">
           <polyline points={points} fill="none" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" className={stroke} />
           {hoverIndex !== null && values[hoverIndex] !== undefined ? (
             <g>

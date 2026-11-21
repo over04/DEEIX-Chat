@@ -11,7 +11,7 @@ const INTERACTIVE = "a, button, input, textarea, select, summary, [contenteditab
 const DRAG_THRESHOLD = 6;
 
 type UseMarkdownCopyOptions = { contentVersion: string; renderVersion: unknown };
-type MarkdownCopyTarget = { kind: "formula"; element: Element } | { kind: "code"; text: string };
+type MarkdownCopyTarget = { kind: "formula" | "code"; element: Element };
 
 function asElement(target: EventTarget | null) {
   return target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
@@ -25,7 +25,7 @@ function resolveCopyTarget(target: EventTarget | null, root: HTMLElement): Markd
   const element = asElement(target);
   if (!element || !root.contains(element) || element.closest(INTERACTIVE + ", [data-clipboard-formula]")) return null;
   const code = element.closest("[data-inline-code-copyable='true']");
-  if (code?.textContent?.trim()) return { kind: "code", text: code.textContent };
+  if (code?.textContent?.trim()) return { kind: "code", element: code };
   if (element.closest("pre, code")) return null;
   const formula = outerFormula(element);
   return formula && root.contains(formula) && (formula.matches("math") || formula.querySelector("math"))
@@ -44,7 +44,7 @@ export function useMarkdownCopy({ contentVersion, renderVersion }: UseMarkdownCo
   const t = useTranslations("chat.markdown");
   const commonActions = useTranslations("common.actions");
   const commonErrors = useTranslations("common.errors");
-  const { copy, copyRendered } = useRenderedCopy({ copied: t("formulaCopied"), failed: t("formulaCopyFailed") });
+  const { copyRendered } = useRenderedCopy({ copied: t("formulaCopied"), failed: t("formulaCopyFailed") });
   const rootRef = React.useRef<HTMLDivElement>(null);
   const pointerDownRef = React.useRef<{ x: number; y: number } | null>(null);
 
@@ -64,10 +64,10 @@ export function useMarkdownCopy({ contentVersion, renderVersion }: UseMarkdownCo
 
   const copyMarkdownTarget = React.useCallback((target: MarkdownCopyTarget) => {
     if (target.kind === "code") {
-      return copy(target.text, { copied: commonActions("copied"), failed: commonErrors("copyFailed") });
+      return copyRendered(target.element, { copied: commonActions("copied"), failed: commonErrors("copyFailed") });
     }
     return copyRendered(target.element);
-  }, [commonActions, commonErrors, copy, copyRendered]);
+  }, [commonActions, commonErrors, copyRendered]);
 
   const onPointerDownCapture = React.useCallback<React.PointerEventHandler<HTMLDivElement>>((event) => {
     pointerDownRef.current = event.button === 0 ? { x: event.clientX, y: event.clientY } : null;

@@ -112,7 +112,7 @@ export function useCopyAction({ messages, resetDelayMs = 1500 }: CopyActionOptio
 
 type CopyActionButtonProps = Omit<React.ComponentProps<typeof Button>, "onClick"> & {
   value?: string;
-  resolveValue?: () => string | Promise<string>;
+  resolveValue?: () => string | RichClipboardContent | undefined | Promise<string | RichClipboardContent | undefined>;
   messages: CopyActionMessages;
   copyOptions?: CopyActionInput;
   resetDelayMs?: number;

@@ -8,6 +8,7 @@ import {
   type AllowedTags,
   defaultRehypePlugins,
   defaultRemarkPlugins,
+  defaultUrlTransform,
   type IconMap,
   type PluginConfig,
   Streamdown,
@@ -24,12 +25,14 @@ import {
 import { Marker, MarkerContent } from "@/components/ui/marker";
 import { cn } from "@/lib/utils";
 import { useAutoExpandDisclosure } from "@/shared/hooks/use-auto-expand-disclosure";
+import { isPortableRasterImage } from "@/shared/lib/clipboard-image";
 import { isRecord, isStringArray } from "@/shared/lib/type-guards";
 import {
   AdaptiveMarkdownTable,
   MarkdownTableLineBreak,
   MarkdownTableStreamingContext,
 } from "./adaptive-markdown-table";
+import { isPortablePlotImage } from "./clipboard-plot";
 import { StreamdownAdapterStyles } from "./streamdown-adapter-styles";
 import {
   type MarkdownArtifactActions,
@@ -237,6 +240,13 @@ const STREAMDOWN_SANITIZED_HTML_TAGS = {
 } satisfies AllowedTags;
 type StreamdownRehypePlugins = NonNullable<StreamdownProps["rehypePlugins"]>;
 type StreamdownRehypePlugin = StreamdownRehypePlugins[number];
+
+const markdownURLTransform: NonNullable<StreamdownProps["urlTransform"]> = (url, key, node) => {
+  if (/^data:/i.test(url)) {
+    return key === "src" && node.tagName === "img" && (isPortableRasterImage(url) || isPortablePlotImage(url)) ? url : undefined;
+  }
+  return defaultUrlTransform(url, key, node);
+};
 type RehypeSourceNode = {
   type?: string;
   tagName?: string;
@@ -289,9 +299,13 @@ function buildStreamdownRehypePlugins(includeSourcePositions = false): Streamdow
   const extraTagNames = Object.keys(STREAMDOWN_SANITIZED_HTML_TAGS);
   const baseTagNames = isStringArray(sanitizeSchema.tagNames) ? sanitizeSchema.tagNames : [];
   const tagNames = Array.from(new Set([...baseTagNames, ...extraTagNames]));
+  const protocols = isRecord(sanitizeSchema.protocols) ? sanitizeSchema.protocols : {};
+  const imageProtocols = isStringArray(protocols.src) ? protocols.src : [];
   const schema = {
     ...sanitizeSchema,
     tagNames,
+    // markdownURLTransform accepts data only for validated image sources.
+    protocols: { ...protocols, src: [...imageProtocols, "data"] },
     attributes: {
       ...(isRecord(sanitizeSchema.attributes) ? sanitizeSchema.attributes : {}),
       ...STREAMDOWN_SANITIZED_HTML_TAGS,
@@ -541,11 +555,7 @@ async function loadStreamdownPlugins(features: StreamdownFeatureFlags): Promise<
     if (features.mermaid) {
       const { createMermaidPlugin } = await import("@streamdown/mermaid");
       plugins.mermaid = createMermaidPlugin({
-        config: {
-          flowchart: {
-            htmlLabels: false,
-          },
-        },
+        config: { htmlLabels: false },
       });
     }
 
@@ -693,6 +703,7 @@ function ThinkingSegmentBlock({
             rehypePlugins={STREAMDOWN_REHYPE_PLUGINS}
             remarkPlugins={remarkPlugins}
             remarkRehypeOptions={MARKUP_REHYPE_OPTIONS}
+            urlTransform={markdownURLTransform}
             remend={STREAMDOWN_REMEND}
             mermaid={STREAMDOWN_MERMAID_OPTIONS}
             mode={active ? "streaming" : "static"}
@@ -861,6 +872,7 @@ export const StreamdownRender = React.memo(function StreamdownRender({
                           rehypePlugins={rehypePlugins}
                           remarkPlugins={remarkPlugins}
                           remarkRehypeOptions={MARKUP_REHYPE_OPTIONS}
+                          urlTransform={markdownURLTransform}
                           remend={STREAMDOWN_REMEND}
                           mermaid={STREAMDOWN_MERMAID_OPTIONS}
                           linkSafety={STREAMDOWN_LINK_SAFETY}

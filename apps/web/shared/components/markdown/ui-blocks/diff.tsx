@@ -1,13 +1,14 @@
 "use client";
 
-import { Check, ChevronDown, ChevronUp, Columns2, Copy, Rows3 } from "lucide-react";
+import { ChevronDown, ChevronUp, Columns2, Rows3 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import * as React from "react";
 
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { writeClipboardText } from "@/shared/lib/clipboard";
+import { CopyActionButton } from "@/shared/components/copy-action";
 import { type DiffLine, type DiffSegment, diffLines, diffWords, lineSimilarity } from "@/shared/lib/line-diff";
+import { renderedRichClipboard } from "../markdown-rich-copy";
 import type { UIBlockDefinition, UIBlockRenderProps } from "./block";
 import { joinTextBlocks, textTitle } from "./block-text";
 import { s } from "./schema";
@@ -23,7 +24,6 @@ export type DiffProps = {
 };
 
 const CONTEXT_LINES = 3;
-const COPIED_MS = 1500;
 
 type Row = DiffLine & { hunk?: number; segments?: DiffSegment[]; pair?: Row };
 type DisplayRow = Row | { kind: "gap"; count: number };
@@ -182,10 +182,11 @@ function LineText({ row }: { row: Row }) {
 
 function Diff({ id, props }: UIBlockRenderProps<DiffProps>) {
   const t = useTranslations("chat.markdown.uiBlock");
+  const actions = useTranslations("common.actions");
+  const errors = useTranslations("common.errors");
   const [expanded, setExpanded] = React.useState(false);
   const [split, setSplit] = React.useState(false);
   const [activeHunk, setActiveHunk] = React.useState<number | null>(null);
-  const [copied, setCopied] = React.useState(false);
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
   const { rows: annotated, hunks } = React.useMemo(() => annotate(diffLines(props.before, props.after)), [props.after, props.before]);
@@ -211,14 +212,17 @@ function Diff({ id, props }: UIBlockRenderProps<DiffProps>) {
     }
   };
 
-  const copyAfter = async () => {
-    try {
-      await writeClipboardText(props.after);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), COPIED_MS);
-    } catch {
-      setCopied(false);
-    }
+  const copyAfter = () => {
+    const owner = scrollRef.current?.ownerDocument;
+    if (!owner) return;
+    // The button's range is the entire result, including collapsed context,
+    // not the visible before/after comparison table.
+    const pre = owner.createElement("pre");
+    const code = owner.createElement("code");
+    if (props.language) code.className = "language-" + props.language;
+    code.textContent = props.after;
+    pre.append(code);
+    return renderedRichClipboard(pre);
   };
 
   const rowClass = (kind: DiffLine["kind"] | undefined, hunk: number | undefined) =>
@@ -263,9 +267,16 @@ function Diff({ id, props }: UIBlockRenderProps<DiffProps>) {
           <button type="button" aria-pressed={split} aria-label={split ? t("diffUnified") : t("diffSplit")} title={split ? t("diffUnified") : t("diffSplit")} onClick={() => setSplit((value) => !value)} className={iconButton}>
             {split ? <Rows3 className="size-3.5" strokeWidth={1.8} /> : <Columns2 className="size-3.5" strokeWidth={1.8} />}
           </button>
-          <button type="button" aria-label={t("diffCopyAfter")} title={t("diffCopyAfter")} onClick={copyAfter} className={iconButton}>
-            {copied ? <Check className="size-3.5 text-green-600 dark:text-green-400" strokeWidth={2} /> : <Copy className="size-3.5" strokeWidth={1.8} />}
-          </button>
+          <CopyActionButton
+            type="button"
+            aria-label={t("diffCopyAfter")}
+            title={t("diffCopyAfter")}
+            variant="ghost"
+            size="icon"
+            className={iconButton}
+            resolveValue={copyAfter}
+            messages={{ copied: actions("copied"), failed: errors("copyFailed") }}
+          />
         </div>
       </div>
       <div ref={scrollRef} className="relative max-h-[32rem] overflow-auto">

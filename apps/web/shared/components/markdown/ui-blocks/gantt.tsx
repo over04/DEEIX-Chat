@@ -310,6 +310,7 @@ function Gantt({ id, props }: UIBlockRenderProps<GanttProps>) {
                 layout="position"
                 transition={MOTION}
                 type="button"
+                data-clipboard-label=""
                 aria-expanded={!collapsed.has(entry.name)}
                 onClick={() => toggleGroup(entry.name)}
                 className="flex w-full items-center gap-1 px-3 text-left text-[11px] font-medium tracking-[0.04em] text-muted-foreground transition-colors hover:text-foreground"
@@ -327,6 +328,7 @@ function Gantt({ id, props }: UIBlockRenderProps<GanttProps>) {
                 exit={{ height: 0, opacity: 0 }}
                 transition={MOTION}
                 type="button"
+                data-clipboard-label=""
                 aria-pressed={selected === entry.item.key}
                 onClick={() => setSelected((current) => (current === entry.item.key ? null : entry.item.key))}
                 className={cn(
@@ -348,7 +350,7 @@ function Gantt({ id, props }: UIBlockRenderProps<GanttProps>) {
         </div>
 
         <div ref={timelineRef} className="min-w-0 flex-1 overflow-x-auto">
-          <svg width={width} height={HEADER_HEIGHT + bodyHeight} className="block" role="img" aria-label={props.title ?? "gantt"}>
+          <svg data-clipboard-plot="" width={width} height={HEADER_HEIGHT + bodyHeight} className="block" role="img" aria-label={props.title ?? "gantt"}>
             <AnimatePresence initial={false}>
             <motion.g key={`labels-${scale.unit}`} className="fill-muted-foreground" fontSize={10} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={MOTION}>
               {ticks

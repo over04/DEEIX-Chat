@@ -19,9 +19,10 @@ import {
 import { useImageDisplaySource } from "@/shared/hooks/use-image-display-source";
 import { downloadMarkdownImageSource, resolveMarkdownImageDownloadName } from "@/shared/lib/markdown-image-source";
 import { MarkdownTableStreamingContext } from "./adaptive-markdown-table";
+import { renderedCodeClipboard } from "./markdown-rich-copy";
 import { MarkdownFootnotesContext } from "./streamdown-html";
 import { StreamdownCheckIcon, StreamdownCopyIcon } from "./streamdown-icons";
-import { MarkdownMermaidLoading, MarkdownMermaidPendingContext } from "./streamdown-mermaid";
+import { MarkdownMermaidContent, MarkdownMermaidLoading, MarkdownMermaidPendingContext } from "./streamdown-mermaid";
 import { sanitizeHTMLStyle } from "./streamdown-style";
 import { UI_WIDGET_FENCE_LANGUAGE } from "@deeix/core";
 import { MarkdownWidgetHost, UI_BLOCK_FENCE_LANGUAGE, UIBlockHost } from "./ui-blocks";
@@ -333,10 +334,6 @@ function ensureCodeBlockLanguage(
   });
 }
 
-function isMermaidLanguage(language: string): boolean {
-  return language === "mermaid" || language === "mmd";
-}
-
 function CodeBlockActionButton({
   label,
   children,
@@ -367,17 +364,23 @@ function CodeBlockActions({
   code,
   language,
   previewable,
+  blockRef,
 }: {
   code: string;
   language: string;
   previewable: boolean;
+  blockRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const commonActions = useTranslations("common.actions");
   const commonErrors = useTranslations("common.errors");
   const artifactCopy = useTranslations("chat.markdown.artifact");
   const artifactActions = React.useContext(MarkdownArtifactActionsContext);
   const artifactKind = React.useMemo(() => resolveArtifactPreviewKind(language, code), [code, language]);
-  const copyCode = code.replace(/\n$/, "");
+  const resolveCodeCopy = React.useCallback(() => {
+    const text = code.replace(/\n$/, "");
+    const pre = blockRef.current?.querySelector("pre");
+    return (pre && renderedCodeClipboard(pre, text)) ?? text;
+  }, [blockRef, code]);
 
   const handleOpenArtifact = React.useCallback(() => {
     if (!artifactActions || !artifactKind) {
@@ -407,7 +410,7 @@ function CodeBlockActions({
               variant="ghost"
               size="icon-xs"
               className={CODE_BLOCK_ACTION_BUTTON_CLASSNAME}
-              value={copyCode}
+              resolveValue={resolveCodeCopy}
               messages={{ copied: commonActions("copied"), failed: commonErrors("copyFailed") }}
               copyIcon={<StreamdownCopyIcon className="size-3" />}
               copiedIcon={<StreamdownCheckIcon className="size-3" />}
@@ -508,12 +511,12 @@ function isFootnoteBackrefElement(node: React.ReactNode): boolean {
 
 export function MarkdownCodePre({ children, node: _node, "data-markdown-source-line": sourceLine, "data-md-range": sourceRange, "data-md-atomic": atomic }: MarkdownCodePreProps) {
   const sourceProps = { "data-md-range": sourceRange, "data-md-atomic": atomic };
+  const blockRef = React.useRef<HTMLDivElement>(null);
   const streaming = React.useContext(MarkdownTableStreamingContext);
   const mermaidPending = React.useContext(MarkdownMermaidPendingContext);
   const childElement = React.isValidElement<StreamdownCodeChildProps>(children) ? ensureCodeBlockLanguage(children) : null;
   const codeContent = childElement ? getCodeTextFromChild(childElement) : "";
   const language = childElement ? getCodeLanguage(childElement.props.className) : "";
-  const mermaid = isMermaidLanguage(language);
   const artifactPreviewable = Boolean(resolveArtifactPreviewKind(language, codeContent));
 
   if (!childElement) {
@@ -541,7 +544,7 @@ export function MarkdownCodePre({ children, node: _node, "data-markdown-source-l
   // Only `mermaid` fences become diagrams in Streamdown; `mmd` stays a plain code block.
   if (language === "mermaid") {
     return (
-      <div
+      <MarkdownMermaidContent
         className="relative w-full"
         {...sourceProps}
         data-markdown-mermaid={mermaidPending ? "pending" : ""}
@@ -549,13 +552,13 @@ export function MarkdownCodePre({ children, node: _node, "data-markdown-source-l
       >
         <MarkdownMermaidLoading />
         {mermaidPending ? null : codeBlock}
-      </div>
+      </MarkdownMermaidContent>
     );
   }
 
   return (
-    <div {...sourceProps} className="relative w-full" data-markdown-source-line={sourceLine}>
-      {!mermaid ? <CodeBlockActions code={codeContent} language={language} previewable={artifactPreviewable} /> : null}
+    <div ref={blockRef} {...sourceProps} className="relative w-full" data-markdown-source-line={sourceLine}>
+      <CodeBlockActions code={codeContent} language={language} previewable={artifactPreviewable} blockRef={blockRef} />
       {codeBlock}
     </div>
   );
@@ -864,7 +867,7 @@ export function MarkdownStrong({ children, className, node: _node, style, ...pro
       className={cn("font-bold text-foreground", className)}
       style={{
         ...sanitizeHTMLStyle(style),
-        fontWeight: "var(--font-chat-strong-weight)",
+        fontWeight: "var(--font-chat-strong-weight, 700)",
       }}
     >
       {children}

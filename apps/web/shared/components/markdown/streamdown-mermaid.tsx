@@ -6,6 +6,8 @@ import * as React from "react";
 import { type MermaidErrorComponentProps, type MermaidOptions, useIsCodeFenceIncomplete } from "streamdown";
 
 import { Button } from "@/components/ui/button";
+import { useCopyAction } from "@/shared/components/copy-action";
+import { RENDERED_MERMAID_SVG, renderedRichClipboard } from "./markdown-rich-copy";
 
 /**
  * True while a message contains a Mermaid fence but the lazily imported Mermaid plugin has not
@@ -39,6 +41,37 @@ export function MarkdownMermaidLoading() {
       </span>
     </div>
   );
+}
+
+export function MarkdownMermaidContent(props: React.ComponentPropsWithoutRef<"div">) {
+  const actions = useTranslations("common.actions");
+  const errors = useTranslations("chat.markdown");
+  const failed = errors("copyRenderFailed");
+  const { copy } = useCopyAction({ messages: { copied: actions("copied"), failed } });
+
+  function onCopyClick(event: React.MouseEvent<HTMLDivElement>) {
+    if (!(event.target instanceof Element)) return;
+    const control = event.target.closest("[data-streamdown='code-block-copy-button']");
+    const toolbar = control?.closest("[data-streamdown='mermaid-block-actions'], [data-streamdown='mermaid-fullscreen']");
+    if (!toolbar) return;
+    const diagram = toolbar.closest("[data-streamdown='mermaid-fullscreen']") ?? event.currentTarget;
+    const svg = diagram.querySelector(RENDERED_MERMAID_SVG);
+    if (!svg) return;
+
+    let content: ReturnType<typeof renderedRichClipboard>;
+    try {
+      content = renderedRichClipboard(svg);
+    } catch {
+      // Unsupported SVG content keeps Streamdown's built-in source copy.
+      return;
+    }
+    if (!content) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void copy(content);
+  }
+
+  return <div {...props} onClickCapture={onCopyClick} />;
 }
 
 function MarkdownMermaidError({ chart, error, retry }: MermaidErrorComponentProps) {
