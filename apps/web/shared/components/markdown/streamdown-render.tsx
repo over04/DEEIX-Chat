@@ -51,7 +51,6 @@ import {
   normalizeContent,
   escapeNonMathDollars,
   normalizeEscapedHTMLAttributeQuotes,
-  normalizeHTMLBlockBlankLines,
   normalizeHTMLVisualMarkdownFences,
   normalizeLatexUnicodeSymbols,
   normalizeMathDelimiters,
@@ -70,7 +69,15 @@ import {
   MarkdownHTMLSpan,
   MarkdownHTMLSummary,
 } from "./streamdown-html";
-import { normalizeQualifiedXmlWrappers, remarkMarkdownInMarkup, transformOutsideLiteralMarkup } from "./streamdown-mixed-markup";
+import {
+  getLiteralMarkupRanges,
+  MARKUP_REHYPE_OPTIONS,
+  normalizeHTMLBlockBlankLines,
+  normalizeQualifiedXmlWrappers,
+  rehypeRestoreMarkupParagraphs,
+  remarkMarkdownInMarkup,
+  transformOutsideLiteralMarkup,
+} from "./streamdown-mixed-markup";
 import { MarkdownMermaidPendingContext, STREAMDOWN_MERMAID_OPTIONS } from "./streamdown-mermaid";
 import {
   createStreamdownTooltipIcon,
@@ -204,7 +211,7 @@ function useStreamdownIcons(): Partial<IconMap> {
   );
 }
 
-const STREAMDOWN_REMARK_PLUGINS = [...Object.values(defaultRemarkPlugins), remarkMarkdownInMarkup];
+const BASE_STREAMDOWN_REMARK_PLUGINS = Object.values(defaultRemarkPlugins);
 
 const STREAMDOWN_REMEND = {
   linkMode: "text-only",
@@ -292,6 +299,7 @@ function buildStreamdownRehypePlugins(includeSourcePositions = false): Streamdow
 
   return [
     [escapeUnsupportedInlineHTMLRehypePlugin, tagNames],
+    rehypeRestoreMarkupParagraphs,
     defaultRehypePlugins.raw,
     sanitizeWithHTMLTags,
     ...(includeSourcePositions ? [markdownSourcePositionRehypePlugin] : []),
@@ -431,12 +439,20 @@ const USER_BLOCK_LINE_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|\||```|~~~)/;
 // fenced code, or the literal parts of a markup container.
 function normalizeUserLineBreaks(content: string): string {
   const lines = content.split("\n");
+  const literals = getLiteralMarkupRanges(content);
   const out: string[] = [];
+  let literalIndex = 0;
+  let lineStart = 0;
   let fence: { marker: string; length: number } | undefined;
   let inDisplayMath = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
     out.push(line);
+    while (literals[literalIndex]?.end <= lineStart) literalIndex++;
+    lineStart += line.length + 1;
+    // Inspect whole lines: splitting on an inline code tag could turn the
+    // remainder of its line into a new paragraph outside the containing HTML.
+    if (literals[literalIndex]?.start < lineStart) continue;
     const marker = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
     if (marker && !inDisplayMath) {
       if (!fence) fence = { marker: marker[1][0], length: marker[1].length };
@@ -455,11 +471,7 @@ function normalizeUserLineBreaks(content: string): string {
   return out.join("\n");
 }
 
-function normalizeStreamdownContent(
-  content: unknown,
-  preserveSourceLines = false,
-  streaming = false,
-): string {
+function normalizeStreamdownContent(content: unknown, preserveSourceLines = false): string {
   const markup = normalizeEscapedHTMLAttributeQuotes(normalizeQualifiedXmlWrappers(normalizeContent(content)));
   const normalizedContent = transformOutsideLiteralMarkup(markup, (part) => {
     const escaped = escapeNonMathDollars(part);
@@ -467,12 +479,9 @@ function normalizeStreamdownContent(
       preserveSourceLines ? escaped : normalizeMathDelimiters(escaped),
     ));
   });
-  const fenceNormalizedContent = preserveSourceLines
-    ? normalizedContent
-    : normalizeNestedCodeFences(normalizedContent);
   return preserveSourceLines
-    ? fenceNormalizedContent
-    : normalizeHTMLBlockBlankLines(normalizeHTMLVisualMarkdownFences(fenceNormalizedContent), streaming);
+    ? normalizedContent
+    : normalizeHTMLVisualMarkdownFences(normalizeNestedCodeFences(normalizedContent));
 }
 
 function detectStreamdownFeatures(content: string): StreamdownFeatureFlags {
@@ -615,12 +624,14 @@ function ThinkingSegmentBlock({
   content,
   incomplete,
   plugins,
+  remarkPlugins,
   streaming,
   autoExpand,
 }: {
   content: string;
   incomplete: boolean;
   plugins: PluginConfig;
+  remarkPlugins: StreamdownProps["remarkPlugins"];
   streaming: boolean;
   autoExpand: boolean;
 }) {
@@ -677,7 +688,8 @@ function ThinkingSegmentBlock({
             icons={icons}
             plugins={plugins}
             rehypePlugins={STREAMDOWN_REHYPE_PLUGINS}
-            remarkPlugins={STREAMDOWN_REMARK_PLUGINS}
+            remarkPlugins={remarkPlugins}
+            remarkRehypeOptions={MARKUP_REHYPE_OPTIONS}
             remend={STREAMDOWN_REMEND}
             mermaid={STREAMDOWN_MERMAID_OPTIONS}
             mode={active ? "streaming" : "static"}
@@ -706,23 +718,29 @@ export const StreamdownRender = React.memo(function StreamdownRender({
   artifactActions,
   uiBlockState,
 }: StreamdownRenderProps) {
-  const normalizedContent = React.useMemo(() => {
-    const normalized = normalizeStreamdownContent(content, sourcePositions, streaming);
+  const markdownContent = React.useMemo(() => {
+    const normalized = normalizeStreamdownContent(content, sourcePositions);
     return variant === "user" ? normalizeUserLineBreaks(normalized) : normalized;
-  }, [content, sourcePositions, streaming, variant]);
-  // Read from the text the blocks are rendered from, so keys match the host's.
-  const messageUIBlockState = useMessageUIBlockStateBinding(uiBlockState, normalizedContent);
+  }, [content, sourcePositions, variant]);
+  const marked = React.useMemo(() => normalizeHTMLBlockBlankLines(markdownContent, streaming), [markdownContent, streaming]);
+  const { text: normalizedContent, markerId } = marked;
+  const remarkPlugins = React.useMemo<StreamdownProps["remarkPlugins"]>(
+    () => [...BASE_STREAMDOWN_REMARK_PLUGINS, [remarkMarkdownInMarkup, markerId]],
+    [markerId],
+  );
+  // Parse-only markers must not affect widget completion or persisted UI keys.
+  const messageUIBlockState = useMessageUIBlockStateBinding(uiBlockState, markdownContent);
   // Illustrations whose fence is closed render while the rest still streams.
   const completeWidgets = React.useMemo(
     () =>
       new Set(
-        normalizedContent.includes(UI_WIDGET_FENCE_LANGUAGE)
-          ? scanUIBlockFences(normalizedContent)
+        markdownContent.includes(UI_WIDGET_FENCE_LANGUAGE)
+          ? scanUIBlockFences(markdownContent)
               .filter((fence) => fence.kind === "widget" && fence.closed)
               .map((fence) => widgetKey(fence.body))
           : [],
       ),
-    [normalizedContent],
+    [markdownContent],
   );
   const { plugins, mermaidPending } = useStreamdownPlugins(normalizedContent);
   const segments = React.useMemo(
@@ -743,7 +761,13 @@ export const StreamdownRender = React.memo(function StreamdownRender({
     renderVersion: plugins,
   });
   const copyDocument = React.useMemo(() => ({ source: normalizeContent(content) }), [content]);
-  const copyMap = React.useMemo(() => sourceOffsetMap(copyDocument.source, normalizedContent), [copyDocument, normalizedContent]);
+  const copyMap = React.useMemo(() => {
+    const toOriginalOffset = sourceOffsetMap(copyDocument.source, markdownContent);
+    return (offset: number, bias: "start" | "end") => {
+      const markdownOffset = marked.offset(offset, bias);
+      return markdownOffset == null ? undefined : toOriginalOffset(markdownOffset, bias);
+    };
+  }, [copyDocument, markdownContent, marked]);
   const sourceMapFor = React.useCallback((segment: RenderSegment, input: string) => {
     const localMap = sourceOffsetMap(normalizedContent.slice(segment.start, segment.end), input);
     return (offset: number, bias: "start" | "end") => {
@@ -809,6 +833,7 @@ export const StreamdownRender = React.memo(function StreamdownRender({
                 content={mergedThinkingContent}
                 incomplete={hasIncompleteThinking}
                 plugins={plugins}
+                remarkPlugins={remarkPlugins}
                 streaming={streaming}
                 autoExpand={autoExpandThinking}
               />
@@ -830,7 +855,8 @@ export const StreamdownRender = React.memo(function StreamdownRender({
                           icons={icons}
                           plugins={plugins}
                           rehypePlugins={rehypePlugins}
-                          remarkPlugins={STREAMDOWN_REMARK_PLUGINS}
+                          remarkPlugins={remarkPlugins}
+                          remarkRehypeOptions={MARKUP_REHYPE_OPTIONS}
                           remend={STREAMDOWN_REMEND}
                           mermaid={STREAMDOWN_MERMAID_OPTIONS}
                           linkSafety={STREAMDOWN_LINK_SAFETY}
